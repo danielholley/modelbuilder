@@ -246,20 +246,25 @@ impl JobManager {
     }
 
     fn drive(&self, id: JobId, p: Arc<JobProcess>) {
-        if let Some(stderr) = p.take_stderr() {
+        let stderr = p.take_stderr().map(|stderr| {
             let inner = self.inner.clone();
             std::thread::spawn(move || {
                 for line in BufReader::new(stderr).lines().map_while(|l| l.ok()) {
                     inner.with(id, |j| j.log.push(line));
                 }
-            });
-        }
+            })
+        });
         let inner = self.inner.clone();
         std::thread::spawn(move || {
             let result = p.drive(
                 |rec| inner.with(id, |j| j.push_event(rec.clone())),
                 |line| inner.with(id, |j| j.log.push(line.to_string())),
             );
+            // The process has exited, so stderr is at EOF: take its last lines before
+            // the job reads as finished.
+            if let Some(h) = stderr {
+                let _ = h.join();
+            }
             inner.with(id, |j| match result {
                 Ok(_) => j.finish(JobStatus::Succeeded, None),
                 Err(e) => j.finish(JobStatus::Failed, Some(e.to_string())),
