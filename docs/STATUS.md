@@ -240,7 +240,16 @@ What that changes:
 8. Measure quantized-KV quality (perplexity, long-context retrieval), then
    decide on QAT.
 
-Done so far on this list: `export-hf` itself (commit `c4225d0`). It loads in
+Done so far on this list:
+- items 1–5: the fp32 fallback and the `4xP40` profile; `generate-corpus`
+  and server-based, sharded `extract-features`; DDP; `bench-draft`; and the
+  runbook [`docs/runbooks/bonsai2-mtp.md`](runbooks/bonsai2-mtp.md).
+- The server path was checked on the real model: features match the old
+  path at cosine 1.000000, and the tokens match the HF tokenizer. It also
+  exposed a bug in the old path: llama.cpp unescapes `\t` in prompt text.
+- `bench-draft` on the real model: the ported head accepts 20 of 23 drafts
+  on a code prompt, a 1.93× speedup on CPU.
+- Also done: `export-hf` itself (commit `c4225d0`). It loads in
 transformers on fixtures; the real-model check is item 6.
 
 ## Open questions
