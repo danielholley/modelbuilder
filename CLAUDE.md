@@ -20,8 +20,24 @@ wrong*. It then carries the change through to an exported model.
 
 ## Status
 
-Planning stage. The layout below is the target design, not existing code. Update
-this file when the real layout differs from it.
+The Rust core exists: `mb-ir`, `mb-formats`, `mb-analyze`, `mb-fixtures`, and
+the `modelbuilder` binary with `inspect`. Everything else in the layout below is
+the target design, not code yet. Update this file when the real layout differs.
+
+Research on the first target (DeepSeek-V4.1-Flash KV techniques on Bonsai 2 27B)
+is in `docs/research/targets.md`. Read it before working on attention or KV
+plugins. Its figures come from secondary sources and are marked for
+confirmation.
+
+## Commands
+
+```sh
+cargo build
+cargo test --workspace
+cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings
+cargo run -- inspect <model.gguf | hf-dir> [--json] [--tensors] [--context N]
+cargo run -- fixture qwen-hybrid /tmp/qh   # hidden: writes a tiny test checkpoint
+```
 
 ## Core pipeline
 
@@ -67,19 +83,42 @@ Planned crates:
 
 | Crate | Responsibility |
 |---|---|
-| `mb-ir` | Normalized Model IR: layers, attention/MLP/MoE blocks, tensors, dtypes and quant formats. All other crates speak this. |
-| `mb-formats` | Readers and writers for **HF safetensors + config.json** and **GGUF**. Uses mmap and streaming, and never materializes a full model. |
-| `mb-analyze` | Static, metadata, and weight-statistics analyzers. |
+| `mb-ir` ✅ | Normalized Model IR: layers, attention/MLP/MoE blocks, tensors, dtypes and quant formats. All other crates speak this. No IO. |
+| `mb-formats` ✅ | Readers and writers for **HF safetensors + config.json** and **GGUF**. Uses mmap and streaming, and never materializes a full model. |
+| `mb-analyze` ✅ (static, quant, KV, provenance) | Static, metadata, and weight-statistics analyzers. Weight statistics are not built yet. |
+| `mb-fixtures` ✅ | Tiny synthetic checkpoints for tests (Llama GQA, Qwen3.8-like hybrid, DeepSeek MLA+MoE, mixed-quant GGUF). |
 | `mb-features` | Feature plugin trait plus the built-in features. |
 | `mb-plan` | Recipe parsing, compatibility resolution, stage ordering, and cost models. |
 | `mb-surgery` | Applies feature transforms to produce a modified checkpoint. |
 | `mb-jobs` | Emits training job specs, launches and monitors the Python side. |
-| `mb-server` | Local web API and UI server (axum). |
+| `mb-server` | Local web API (axum) that serves the React UI. |
 | `mb-tui` | Terminal dashboard (ratatui) for SSH and cloud boxes. |
 | `modelbuilder` | Binary that launches `serve` (web), `tui`, and headless subcommands for scripting and CI. |
 
 The web UI and TUI are both clients of the same core. Put logic in library
 crates, never in the UI layers.
+
+### Web UI
+
+React + TypeScript + Vite, in `web/`. It talks to `mb-server` over a JSON API
+whose types are generated from the Rust report types, so they are never
+hand-written twice.
+
+### IR conventions
+
+- **Tensor names are the ground truth** for what a layer contains (mixer type,
+  MoE, MTP). Config values supply sizes, and mismatches between the two become
+  `ModelIr::warnings`, never panics.
+- **Shapes are row-major** (`[out, in]` for linear weights) for every format.
+  The GGUF reader reverses ggml's `ne` order, and the writer reverses it back.
+- **Unknown GGUF tensor types are preserved**, not rejected. Vendor types like
+  PrismML's PQ2_0 are sized from the gap to the next tensor offset, with
+  `bytes_exact = false`.
+- **GGUF metadata keeps exact integer widths** (`MetaValue::U32` vs `U64`),
+  because llama.cpp type-checks keys. A GGUF read→write round trip is
+  byte-identical (tested).
+- New naming conventions go in `mb-ir/src/naming.rs`, with a test case per
+  name.
 
 ### Python package (training, probes)
 
@@ -185,8 +224,8 @@ formats = ["safetensors", "gguf"]
 
 ## Open questions
 
-- Exact specs of the target techniques and models (DeepSeek KV and attention
-  variants, Bonsai 2's quantization format) still need confirming from
-  primary sources before implementing their plugins.
-- Web frontend stack (plain TS + Vite vs. a framework) is not chosen yet.
+- Exact specs of the target techniques and models (CSA2 layer-mode
+  assignment, Top-K and indexer dims; Bonsai 2's PQ2_0 byte layout and real
+  bits/weight) still need confirming from primary sources. The dev
+  environment could not reach arxiv.org or huggingface.co.
 - Dataset sourcing and caching strategy for distillation and retraining.

@@ -1,0 +1,17 @@
+[package]
+name = "mb-formats"
+description = "Streaming readers and writers for HF safetensors and GGUF checkpoints"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mb-ir.workspace = true
+memmap2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,8 @@
+/target
+/runs
+/models
+*.gguf
+*.safetensors
+node_modules/
+__pycache__/
+.venv/
