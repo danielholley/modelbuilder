@@ -184,11 +184,68 @@ retrofit, and needs new runtime kernels, so it comes after.
   time, the peak memory, and the worst fit). All three UIs show it.
 - Later, `plan` can emit one multi-stage job spec for the whole schedule.
 
+## Target hardware (the user's cluster)
+
+| Machines | Per machine | Good for |
+|---|---|---|
+| 2 GPU servers | 4 × Tesla P40 (24 GB, Pascal sm_61) | llama.cpp generation and extraction (int8 dp4a kernels); fp32 training of small heads |
+| 9 CPU servers | 256 GB RAM, 32 threads (Xeon E5-2600 v2, AVX, no AVX2) | llama.cpp prefill for feature extraction in parallel (the fork has SSE/SSSE3 PQ2_0 kernels) |
+| 1 CPU server | 768 GB RAM, 32 threads | large CPU jobs, e.g. streaming weight statistics or exports |
+| Network and storage | dual 40 GbE, 50 TB disk array | shared corpus and feature store |
+
+What that changes:
+
+- **No bf16 on P40.** Pascal has no bf16 support, and fp16 runs at 1/64 rate.
+  PyTorch training must run in **fp32**. The torch backend has to force
+  float32 on GPUs below compute capability 8.0.
+- **The trunk doesn't fit in PyTorch.** Bonsai 2 in fp32 is about 108 GB,
+  more than one server's 96 GB of GPU memory. Training with the trunk online
+  is out on this hardware; that path stays for the restructuring work and
+  larger GPUs.
+- **Precomputed features fit.** Features take 10 KB per token, so 50 M
+  tokens is 0.5 TB and 500 M tokens is 5 TB, which fits on the array.
+  Extraction becomes a sharded job:
+  - each machine runs its own `llama-server` and writes its own feature
+    directory to the array;
+  - training reads all of them.
+- **The MTP head trains in fp32 on the 8 P40s** with DDP:
+  - Memory per GPU: head 1.7 GB, gradients 1.7 GB, AdamW 3.4 GB, fp32 LM head
+    5 GB, fp16 embedding 2.5 GB, plus activations. That is about 15–18 GB of
+    24 GB.
+  - Compute is roughly 10 GFLOP per token, dominated by the 248K-vocab LM
+    head. That gives an estimated 500 tokens/s per GPU and about 4,000
+    tokens/s across 8, so 50 M tokens takes about 3.5 hours. These are
+    estimates, not measurements.
+- **Corpus generation is the slow step.** It is decode-bound.
+  `llama-server` with parallel slots runs on each P40, and the CPU servers
+  can add throughput. Throughput has to be measured on the first run.
+- **KV-cache QAT of the 27B trunk isn't practical on P40s** at the planned
+  100–500 M tokens (trunk forward in fp32, split across 4 GPUs, at roughly
+  100 tokens/s per server). So step 2 starts by *measuring* the quality cost
+  of the fork's quantized KV cache with no training. QAT is only worth it if
+  that cost is large, and then with a much smaller token budget.
+
+### Revised order
+
+1. Force fp32 on pre-Ampere GPUs, and add a `4xP40` hardware profile to the
+   planner.
+2. `generate-corpus` over `llama-server`, sharded by machine.
+3. `extract-features` over `llama-server`, sharded, with `FeatureSet`
+   reading many directories.
+4. DDP for `mtp_align` (`torchrun`).
+5. A runbook for this cluster, plus `bench-draft` for acceptance.
+6. Verify `export-hf` on the real model (per-tensor cosine against
+   Qwen3.8-27B; hidden states against llama.cpp).
+7. Stage ordering in the planner.
+8. Measure quantized-KV quality (perplexity, long-context retrieval), then
+   decide on QAT.
+
+Done so far on this list: `export-hf` itself (commit `c4225d0`). It loads in
+transformers on fixtures; the real-model check is item 6.
+
 ## Open questions
 
-- **Which GPUs are on the servers** (count and memory per GPU)? This decides
-  between the online-trunk path and precomputed features, and whether QAT
-  needs FSDP.
+- ~~Which GPUs are on the servers?~~ Answered: see *Target hardware*.
 - **What the fork's KV-cache types support** on the target GPUs (q4_0 cache
   with flash attention), to pick the QAT format that can actually run.
 - **Where the prompt set comes from** (dataset sourcing and caching is already
