@@ -38,6 +38,44 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_bench(args: argparse.Namespace) -> int:
+    from modelbuilder_train import bench
+
+    sidecars = {}
+    for item in args.sidecar:
+        name, sep, path = item.partition("=")
+        if not sep:
+            name, path = Path(item).stem, item
+        sidecars[name] = Path(path)
+    prompts = [json.loads(line)["prompt"] for line in Path(args.prompts).read_text().splitlines() if line.strip()]
+    results = bench.run(
+        Path(args.llama_bin),
+        Path(args.model),
+        sidecars,
+        prompts,
+        n_predict=args.n_predict,
+        ctx=args.ctx,
+        threads=args.threads,
+        gpu_layers=args.gpu_layers,
+        baseline=not args.no_baseline,
+        progress=lambda r: print(
+            f"prompt {r.prompt} {r.variant:<12} {r.tokens_per_s:7.2f} t/s  accepted {r.accepted}/{r.drafted}",
+            file=sys.stderr,
+            flush=True,
+        ),
+    )
+    report = bench.to_json(results)
+    if args.out:
+        Path(args.out).write_text(json.dumps(report, indent=2) + "\n")
+    print(f"{'variant':<14}{'accepted':>16}{'rate':>9}{'tok/s':>9}{'speedup':>9}")
+    for row in report["summary"]:
+        rate = f"{100 * row['acceptance']:.1f}%" if row["acceptance"] is not None else "–"
+        speed = f"{row['mean_speedup']:.2f}×" if row["mean_speedup"] is not None else "–"
+        acc = f"{row['accepted']}/{row['drafted']}"
+        print(f"{row['variant']:<14}{acc:>16}{rate:>9}{row['mean_tokens_per_s']:>9.2f}{speed:>9}")
+    return 0
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     spec = JobSpec.load(args.spec)
     print(f"ok: {spec.job_id}, {len(spec.stages)} stage(s)")
@@ -215,6 +253,27 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--seq-len", type=int, default=1024)
     e.add_argument("--device", default="auto")
     e.set_defaults(fn=cmd_evaluate)
+
+    b = sub.add_parser("bench-draft", help="draft acceptance and speedup of MTP sidecars in llama.cpp")
+    b.add_argument("--llama-bin", required=True, help="directory with llama-speculative-simple")
+    b.add_argument("--model", required=True, help="target GGUF")
+    b.add_argument(
+        "--sidecar", action="append", required=True, help="name=path.gguf (repeatable), e.g. ported=... aligned=..."
+    )
+    b.add_argument(
+        "--prompts",
+        required=True,
+        help='JSONL with {"prompt": ...} per line (raw text; apply the chat template yourself)',
+    )
+    b.add_argument("--n-predict", type=int, default=128)
+    b.add_argument(
+        "--ctx", type=int, default=4096, help="context size (the default 262K would allocate a 16 GB KV cache)"
+    )
+    b.add_argument("--threads", type=int)
+    b.add_argument("--gpu-layers", type=int, help="-ngl and -ngld; 99 for all")
+    b.add_argument("--no-baseline", action="store_true", help="skip the plain (no drafting) runs")
+    b.add_argument("--out", help="write all results as JSON")
+    b.set_defaults(fn=cmd_bench)
 
     args = p.parse_args(argv)
     return args.fn(args)
