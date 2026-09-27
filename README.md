@@ -11,7 +11,7 @@ are still to come. See `CLAUDE.md` for the design and
 
 ## Build and test
 
-You need a Rust toolchain, **1.82 or newer**. Nothing else is required: there
+You need a Rust toolchain, **1.85 or newer**. Nothing else is required: there
 are no C dependencies and no Python yet.
 
 ```sh
@@ -19,7 +19,7 @@ are no C dependencies and no Python yet.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # macOS / Linux
 # Windows: download and run rustup-init.exe from https://rustup.rs
 
-rustup update stable        # if Rust is already installed but older than 1.82
+rustup update stable        # if Rust is already installed but older than 1.85
 rustup component add clippy rustfmt
 
 # 2. Build and run the tests (they generate tiny synthetic models; no downloads)
