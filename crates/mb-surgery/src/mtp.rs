@@ -126,6 +126,9 @@ pub struct MtpSidecarOptions {
     pub overwrite: bool,
     /// Recorded in the sidecar's provenance metadata.
     pub reference_label: Option<String>,
+    /// The head was already trained against this target (`modelbuilder job
+    /// mtp-align`), not only against the reference trunk.
+    pub aligned_to_target: bool,
 }
 
 fn reference_mtp_name(reference: &ModelIr, suffix: &str) -> Option<String> {
@@ -419,8 +422,15 @@ pub fn port_mtp_sidecar(
         .len();
 
     let mut notes = vec![
-        "The head was trained against the reference trunk, not this target: expect low draft acceptance until the mtp-align stage retrains it against the target's hidden states.".into(),
-        format!("Run with the PrismML fork: -m <target> -md {} --spec-type draft-mtp", out.display()),
+        if opts.aligned_to_target {
+            "The head was aligned to this target's hidden states (mtp_align).".into()
+        } else {
+            "The head was trained against the reference trunk, not this target: expect low draft acceptance until the mtp-align stage retrains it against the target's hidden states.".into()
+        },
+        format!(
+            "Run with the PrismML fork: -m <target> -md {} --spec-type draft-mtp",
+            out.display()
+        ),
     ];
     if target_ir.weight_rotation.is_some() {
         notes.push("Head weights are stored unrotated and are not listed in prism.hadamard.weight_names, so the runtime multiplies them without the activation transform, as their training expects.".into());

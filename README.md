@@ -11,8 +11,8 @@ work. Training and the dashboards are still to come. See `CLAUDE.md` for the des
 
 ## Build and test
 
-You need a Rust toolchain, **1.85 or newer**. Nothing else is required: there
-are no C dependencies and no Python yet.
+You need a Rust toolchain, **1.85 or newer**, with no C dependencies. The
+training side is optional and needs Python 3.11+ (see *Training* below).
 
 ```sh
 # 1. Install Rust, if you don't have it (https://rustup.rs)
@@ -29,6 +29,11 @@ cargo test --workspace
 # 3. Lint, as CI would
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+
+# 4. Optional: the Python training side and its tests (includes an end-to-end
+#    run through the Rust binary built in step 2)
+python3 -m venv python/.venv && python/.venv/bin/pip install -e "python[torch,dev]"
+cd python && .venv/bin/ruff check . && .venv/bin/pytest -q && cd ..
 ```
 
 ## Try it
@@ -91,6 +96,33 @@ llama-cli -m models/Ternary-Bonsai-2-27B-PQ2_0.gguf \
 
 The reference only needs its `mtp.*` tensors and `config.json`, not the whole
 checkpoint. Header-only or sparse copies work.
+
+## Training: align the MTP head to Bonsai 2
+
+The ported head was trained against Qwen3.8's trunk. `job mtp-align` fine-tunes
+it on Bonsai 2's own hidden states with the trunk frozen: only the head's 425M
+parameters train. The trunk runs once, in llama.cpp, to produce features, and
+PyTorch never loads the ternary model. See `docs/research/mtp-align.md` for the
+design and how it was checked against the fork.
+
+```sh
+# Python side (Python 3.11+; install PyTorch for your platform first if you need CUDA/MPS)
+python -m venv python/.venv && python/.venv/bin/pip install -e "python[torch]"
+
+# 1. Trunk features: texts.jsonl has one {"text": ...} per line
+python/.venv/bin/python -m modelbuilder_train extract-features \
+    --llama-bin path/to/prism-llama.cpp/build/bin \
+    --model models/Ternary-Bonsai-2-27B-PQ2_0.gguf --texts texts.jsonl --out runs/bonsai2-feat
+
+# 2. Export the frozen tensors, write job.json, train (live progress), write the sidecar
+cargo run --release -- job mtp-align models/Ternary-Bonsai-2-27B-PQ2_0.gguf \
+    --from models/Qwen3.8-27B --features runs/bonsai2-feat -o runs/bonsai2-mtp \
+    --python python/.venv/bin/python --steps 2000
+```
+
+`--emit-only` stops after writing `runs/<name>/job.json`. Copy the run
+directory to a GPU machine and run `modelbuilder job run job.json` (or
+`python -m modelbuilder_train run job.json`) there.
 
 Options for `inspect`: `--json` prints the full report as JSON, `--tensors` lists every
 tensor with its role, and `--context N` sets the context length used for the

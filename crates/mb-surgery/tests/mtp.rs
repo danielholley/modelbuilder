@@ -149,3 +149,78 @@ fn refuses_unsafe_or_mismatched_inputs() {
     .unwrap_err();
     assert!(e.to_string().contains("architecture"), "{e}");
 }
+
+#[test]
+fn exports_rotated_tensors_in_the_primal_basis() {
+    use mb_ir::DType;
+    use mb_surgery::export::{export_primal, ExportOptions};
+    let dir = tempfile::tempdir().unwrap();
+    let (m, ir) = open(&mb_fixtures::gguf_bonsai_like(dir.path()));
+    let out = dir.path().join("frozen.safetensors");
+    let names = vec![
+        "output.weight".to_string(),
+        "token_embd.weight".to_string(),
+        "output_norm.weight".to_string(),
+    ];
+    let opts = ExportOptions {
+        names: names.clone(),
+        dtype: DType::F32,
+        overwrite: false,
+    };
+    export_primal(&m, &ir, &out, &opts).unwrap();
+
+    let x = mb_formats::safetensors::parse_header(&std::fs::read(&out).unwrap(), &out, 0).unwrap();
+    assert_eq!(x.metadata["modelbuilder.export"], "primal");
+    let bytes = std::fs::read(&out).unwrap();
+    let read = |name: &str| -> Vec<f32> {
+        let t = x.tensors.iter().find(|t| t.name == name).unwrap();
+        bytes[t.offset as usize..(t.offset + t.n_bytes) as usize]
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .collect()
+    };
+    let rot = ir.weight_rotation.as_ref().unwrap();
+    for name in ["output.weight", "token_embd.weight"] {
+        // Expected: decode, then undo the rotation row by row.
+        let mut expect = decode(&m, name);
+        for row in expect.chunks_exact_mut(128) {
+            rot.to_primal(name, row).unwrap();
+        }
+        let got = read(name);
+        assert!(
+            got.iter().zip(&expect).all(|(a, b)| (a - b).abs() < 1e-6),
+            "{name}"
+        );
+        assert_ne!(
+            got,
+            decode(&m, name),
+            "{name} must not be the stored (rotated) values"
+        );
+    }
+    // Unrotated tensors are just decoded.
+    assert_eq!(read("output_norm.weight"), decode(&m, "output_norm.weight"));
+
+    // BF16 output halves the size; missing names and bad dtypes are refused.
+    let out16 = dir.path().join("frozen16.safetensors");
+    export_primal(
+        &m,
+        &ir,
+        &out16,
+        &ExportOptions {
+            dtype: DType::Bf16,
+            ..opts.clone()
+        },
+    )
+    .unwrap();
+    assert!(std::fs::metadata(&out16).unwrap().len() < std::fs::metadata(&out).unwrap().len());
+    let bad = ExportOptions {
+        names: vec!["nope".into()],
+        ..opts.clone()
+    };
+    assert!(export_primal(&m, &ir, &dir.path().join("x.safetensors"), &bad).is_err());
+    let bad = ExportOptions {
+        dtype: DType::F16,
+        ..opts
+    };
+    assert!(export_primal(&m, &ir, &dir.path().join("y.safetensors"), &bad).is_err());
+}

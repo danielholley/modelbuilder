@@ -14,10 +14,11 @@ mb-formats = { path = "crates/mb-formats" }
 mb-analyze = { path = "crates/mb-analyze" }
 mb-features = { path = "crates/mb-features" }
 mb-fixtures = { path = "crates/mb-fixtures" }
+mb-jobs = { path = "crates/mb-jobs" }
 mb-plan = { path = "crates/mb-plan" }
 mb-surgery = { path = "crates/mb-surgery" }
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 memmap2 = "0.9"
 nalgebra = { version = "0.33", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
