@@ -173,7 +173,8 @@ impl Feature for Mtp {
                     gib(n_head as f64 * 2.0)
                 ),
                 "Token budgets are heuristics; EAGLE-style draft heads are typically trained on well under 1B tokens.".into(),
-                "Reference speedup: PrismML's DSpark drafter for 1-bit Bonsai 27B accepts τ≈3.6 tokens at k=4, a 1.37× decode speedup on H100, and is not a net win on Apple Silicon at batch 1 (model card). An MTP head is a different drafter; its speedup here is unmeasured.".into(),
+                "Reference speedup: PrismML's DSpark drafter for 1-bit Bonsai 27B accepts τ≈3.6 tokens at k=4, a 1.37× decode speedup on H100, and is not a net win on Apple Silicon at batch 1 (model card). An MTP head is a different drafter.".into(),
+                "Measured (docs/research/mtp-port.md): Qwen3.8's head ported to Ternary-Bonsai-2-27B with no training accepted 64% of drafts (44–84% across 4 prompts) for a 1.37–2.07× decode speedup on a 4-core CPU; a control without the norm conversion accepted 0%. GPU speedups are not measured.".into(),
             ],
             confidence: if ported { Confidence::Medium } else { Confidence::Low },
             references: vec![
