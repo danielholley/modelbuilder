@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/danielholley/modelbuilder/schema/events.v1.schema.json",
+  "title": "modelbuilder training events, version 1",
+  "description": "One JSON object per line (JSONL), written by modelbuilder_train on stdout and read by the Rust side.",
+  "type": "object",
+  "required": ["schema_version", "event", "time"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "time": { "type": "number", "description": "Unix time, seconds." },
+    "event": { "enum": ["started", "progress", "eval", "checkpoint", "finished", "error"] },
+    "stage": { "type": ["string", "null"] }
+  },
+  "oneOf": [
+    { "properties": { "event": { "const": "started" }, "job_id": { "type": "string" }, "device": { "type": "string" }, "trainable_params": { "type": "integer" }, "train_tokens": { "type": "integer" }, "eval_tokens": { "type": "integer" } }, "required": ["job_id", "device"] },
+    { "properties": { "event": { "const": "progress" }, "step": { "type": "integer" }, "steps": { "type": "integer" }, "tokens": { "type": "integer" }, "loss": { "type": "number" }, "accuracy": { "type": "number" }, "lr": { "type": "number" }, "tokens_per_s": { "type": "number" } }, "required": ["step", "steps", "loss"] },
+    { "properties": { "event": { "const": "eval" }, "step": { "type": "integer" }, "loss": { "type": "number" }, "accuracy": { "type": "number" }, "tokens": { "type": "integer" } }, "required": ["step", "loss", "accuracy"] },
+    { "properties": { "event": { "const": "checkpoint" }, "step": { "type": "integer" }, "path": { "type": "string" } }, "required": ["step", "path"] },
+    { "properties": { "event": { "const": "finished" }, "status": { "enum": ["ok", "failed"] }, "outputs": { "type": "object", "additionalProperties": { "type": "string" } } }, "required": ["status"] },
+    { "properties": { "event": { "const": "error" }, "message": { "type": "string" } }, "required": ["message"] }
+  ]
+}

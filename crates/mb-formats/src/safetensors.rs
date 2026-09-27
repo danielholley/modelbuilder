@@ -185,11 +185,52 @@ pub fn open(dir: &Path) -> Result<LoadedModel> {
     })
 }
 
-/// Writes one safetensors file, streaming tensor data in the given order.
-pub fn write(
+/// A tensor's header entry, for [`write_streaming`].
+#[derive(Clone, Debug)]
+pub struct TensorHeader {
+    pub name: String,
+    pub dtype: DType,
+    pub shape: Vec<u64>,
+}
+
+impl TensorHeader {
+    fn n_bytes(&self) -> Result<u64> {
+        let n: u64 = self.shape.iter().product();
+        self.dtype
+            .storage_bytes(n)
+            .ok_or_else(|| crate::Error::Tensor {
+                name: self.name.clone(),
+                msg: format!("{} {:?} has no whole-byte size", self.dtype, self.shape),
+            })
+    }
+}
+
+/// Counts bytes passing through, so each tensor's producer can be checked.
+struct Counting<'a, W: Write> {
+    inner: &'a mut W,
+    written: u64,
+}
+
+impl<W: Write> Write for Counting<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.written += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Writes one safetensors file whose tensor data is produced on the fly:
+/// `produce(i, writer)` must write exactly the bytes of `headers[i]`. Lets
+/// callers stream large tensors chunk by chunk instead of buffering them.
+pub fn write_streaming(
     path: &Path,
-    tensors: &[TensorToWrite<'_>],
+    headers: &[TensorHeader],
     metadata: &BTreeMap<String, String>,
+    mut produce: impl FnMut(usize, &mut dyn Write) -> std::io::Result<()>,
 ) -> Result<()> {
     let mut header = Map::new();
     if !metadata.is_empty() {
@@ -199,9 +240,9 @@ pub fn write(
             .collect();
         header.insert("__metadata__".into(), Value::Object(m));
     }
+    let mut sizes = Vec::with_capacity(headers.len());
     let mut offset = 0u64;
-    for t in tensors {
-        t.check_size()?;
+    for t in headers {
         let dtype = t
             .dtype
             .safetensors_name()
@@ -209,11 +250,13 @@ pub fn write(
                 name: t.name.clone(),
                 msg: format!("{} cannot be stored in safetensors", t.dtype),
             })?;
-        let end = offset + t.data.len() as u64;
+        let size = t.n_bytes()?;
+        let end = offset + size;
         header.insert(
             t.name.clone(),
             serde_json::json!({ "dtype": dtype, "shape": t.shape, "data_offsets": [offset, end] }),
         );
+        sizes.push(size);
         offset = end;
     }
     let mut header_bytes = serde_json::to_vec(&Value::Object(header)).expect("header serializes");
@@ -224,15 +267,45 @@ pub fn write(
 
     let file = File::create(path).map_err(io_err(path))?;
     let mut w = BufWriter::new(file);
-    let result = (|| {
-        w.write_all(&(header_bytes.len() as u64).to_le_bytes())?;
-        w.write_all(&header_bytes)?;
-        for t in tensors {
-            w.write_all(&t.data)?;
+    w.write_all(&(header_bytes.len() as u64).to_le_bytes())
+        .and_then(|_| w.write_all(&header_bytes))
+        .map_err(io_err(path))?;
+    for (i, (t, &size)) in headers.iter().zip(&sizes).enumerate() {
+        let mut c = Counting {
+            inner: &mut w,
+            written: 0,
+        };
+        produce(i, &mut c).map_err(io_err(path))?;
+        if c.written != size {
+            return Err(crate::Error::Tensor {
+                name: t.name.clone(),
+                msg: format!("producer wrote {} bytes, expected {size}", c.written),
+            });
         }
-        w.flush()
-    })();
-    result.map_err(io_err(path))
+    }
+    w.flush().map_err(io_err(path))
+}
+
+/// Writes one safetensors file, streaming tensor data in the given order.
+pub fn write(
+    path: &Path,
+    tensors: &[TensorToWrite<'_>],
+    metadata: &BTreeMap<String, String>,
+) -> Result<()> {
+    for t in tensors {
+        t.check_size()?;
+    }
+    let headers: Vec<TensorHeader> = tensors
+        .iter()
+        .map(|t| TensorHeader {
+            name: t.name.clone(),
+            dtype: t.dtype,
+            shape: t.shape.clone(),
+        })
+        .collect();
+    write_streaming(path, &headers, metadata, |i, w| {
+        w.write_all(&tensors[i].data)
+    })
 }
 
 #[cfg(test)]

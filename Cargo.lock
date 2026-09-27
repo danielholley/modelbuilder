@@ -286,6 +286,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mb-jobs"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "mb-plan"
 version = "0.1.0"
 dependencies = [
@@ -338,6 +347,7 @@ dependencies = [
  "mb-fixtures",
  "mb-formats",
  "mb-ir",
+ "mb-jobs",
  "mb-plan",
  "mb-surgery",
  "serde_json",

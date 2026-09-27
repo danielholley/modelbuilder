@@ -22,9 +22,12 @@ wrong*. It then carries the change through to an exported model.
 
 The Rust core exists: `mb-ir`, `mb-formats`, `mb-analyze`, `mb-fixtures`,
 `mb-features` (plugin trait, three plugins, cost model), `mb-plan` (recipes and
-plans), `mb-surgery` (MTP head port), and the `modelbuilder` binary with
-`inspect`, `stats`, `plan`, `features` and `surgery mtp`. Training and the UIs
-are not built yet. Everything else in the layout below is
+plans), `mb-surgery` (MTP head port, primal tensor export), `mb-jobs` (job
+specs and the Python launcher), and the `modelbuilder` binary with `inspect`,
+`stats`, `plan`, `features`, `surgery mtp`, `export-tensors` and `job`. The
+Python side (`python/modelbuilder_train`) trains an MTP head against a frozen
+trunk (`mtp_align`, see `docs/research/mtp-align.md`). The UIs are not built
+yet. Everything else in the layout below is
 the target design, not code yet. Update this file when the real layout differs.
 
 Research on the first target (DeepSeek-V4.1-Flash KV techniques on Bonsai 2 27B)
@@ -53,7 +56,15 @@ cargo run -- plan <model> [-f id[:k=v,...]]... [--hardware ids] [--json]   # no 
 cargo run -- plan --recipe examples/recipes/bonsai2-kv-and-mtp.toml
 cargo run -- features                        # catalog and hardware profiles
 cargo run --release -- surgery mtp <target.gguf> --from <hf-reference> -o <name>-mtp.gguf
+cargo run --release -- export-tensors <model> --names a,b [--dtype bf16|f32] -o out.safetensors
+cargo run --release -- job mtp-align <target.gguf> --from <hf-reference> --features <dir> -o runs/<name> [--emit-only]
+cargo run --release -- job run runs/<name>/job.json
 cargo run -- fixture qwen-hybrid /tmp/qh   # hidden: writes a tiny test checkpoint
+
+# Python side (python/): once, then lint and test
+python -m venv python/.venv && python/.venv/bin/pip install -e "python[torch,dev]"
+cd python && .venv/bin/ruff check . && .venv/bin/ruff format --check . && .venv/bin/pytest -q
+python -m modelbuilder_train extract-features --llama-bin <fork>/build/bin --model <target.gguf> --texts texts.jsonl --out <dir>
 ```
 
 To inspect a real multi-GB model without downloading it, fetch only the
@@ -111,8 +122,8 @@ Planned crates:
 | `mb-fixtures` ✅ | Tiny synthetic checkpoints for tests (Llama GQA, Qwen3.8-like hybrid, DeepSeek MLA+MoE, mixed-quant GGUF). |
 | `mb-features` ✅ | Feature plugin trait, hardware profiles, and the training cost model (`estimate`). Plugins: `fp4-kv`, `kv-share`, `mtp`. `surgery_outline` describes checkpoint changes; executing them belongs to `mb-surgery`. |
 | `mb-plan` ✅ | Recipe parsing (TOML) and plan assembly: detection, compatibility, estimates priced per hardware profile. Stage ordering across features is not built yet. |
-| `mb-surgery` ✅ (MTP) | Writes new checkpoints with a feature added, streaming from the inputs' mmaps. `mtp::port_mtp_sidecar` ports an HF MTP head into an MTP-only GGUF sidecar for `qwen35` targets, following the PrismML fork's converter; see `docs/research/mtp-port.md` for how it was verified end to end. |
-| `mb-jobs` | Emits training job specs, launches and monitors the Python side. |
+| `mb-surgery` ✅ (MTP) | Writes new checkpoints with a feature added, streaming from the inputs' mmaps. `mtp::port_mtp_sidecar` ports an HF MTP head into an MTP-only GGUF sidecar for `qwen35` targets, following the PrismML fork's converter; see `docs/research/mtp-port.md` for how it was verified end to end. `export::export_primal` writes selected tensors decoded and un-rotated to safetensors for training. |
+| `mb-jobs` ✅ | Job spec and event types (mirroring `schema/`), spec builders (`mtp_align_spec`), and `run`, which launches `python -m modelbuilder_train run` and streams its events. |
 | `mb-server` | Local web API (axum) that serves the React UI. |
 | `mb-tui` | Terminal dashboard (ratatui) for SSH and cloud boxes. |
 | `modelbuilder` | Binary that launches `serve` (web), `tui`, and headless subcommands for scripting and CI. |
@@ -145,11 +156,16 @@ hand-written twice.
 
 ### Python package (training, probes)
 
-`python/modelbuilder_train/` has a **pluggable backend** interface:
+`python/modelbuilder_train/` has a **pluggable backend** interface
+(`backends.BACKENDS`, selected by the spec's `backend`):
 
-- `backends/hf`: PyTorch + transformers + accelerate (FSDP/DeepSpeed) + PEFT.
-  This is the first backend.
-- `backends/mlx`: Apple Silicon, planned.
+- `torch` ✅: plain PyTorch on CUDA, MPS or CPU. Runs frozen-trunk stages
+  (`mtp_align`) from precomputed trunk features, so it never loads the trunk:
+  features come from the runtime that serves the model (`features.py`, llama.cpp
+  for PrismML GGUFs), frozen tensors from `modelbuilder export-tensors`.
+- `hf`: transformers + accelerate (FSDP/DeepSpeed) + PEFT, for stages that train
+  the trunk. Planned.
+- `mlx`: Apple Silicon, planned.
 - `backends/torchtitan`: multi-node continued pretraining, planned.
 
 The Python side also runs behavioral probes and evals.
@@ -164,6 +180,10 @@ The Python side also runs behavioral probes and evals.
   stdout or to a file. Rust consumes these to drive the dashboards.
 - The schema lives in one place (`schema/`), with Rust types and Python
   (pydantic) types checked against it. Bump the version on any breaking change.
+  `schema/examples/` is validated by the Rust tests (`mb-jobs/tests/contract.rs`),
+  the Python tests (`test_contract.py`), and the JSON Schema itself. Change all
+  three together. `python/tests/test_e2e.py` drives the Rust binary end to end
+  (`MODELBUILDER_BIN`, default `target/debug/modelbuilder`) and runs in CI.
 
 ## Feature plugins
 

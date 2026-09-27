@@ -44,6 +44,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --all-targets
 
+  # The training side, plus an end-to-end run through the Rust binary
+  # (fixture target → `modelbuilder job mtp-align` → GGUF sidecar).
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: cargo build -p modelbuilder
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install -e "python[dev]"
+      - run: ruff check python && ruff format --check python
+      - run: pytest -q python/tests
+        env:
+          MODELBUILDER_BIN: ${{ github.workspace }}/target/debug/modelbuilder
+
   # Re-derives the PQ2_0/PTQ1_0 golden vectors from the current PrismML fork.
   # A diff means the fork changed its block format; see
   # docs/research/prismml-quant-formats.md.

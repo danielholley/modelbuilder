@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use mb_ir::ModelIr;
 
+mod job;
 mod render;
 
 #[derive(Parser)]
@@ -74,10 +75,31 @@ enum Command {
     },
     /// List the feature catalog and hardware profiles.
     Features,
+    /// Export tensors decoded and un-rotated (primal basis) to safetensors,
+    /// e.g. a low-bit model's embedding and output head for PyTorch training.
+    ExportTensors {
+        model: PathBuf,
+        /// Tensor names (comma-separated), e.g. token_embd.weight,output.weight.
+        #[arg(long, value_delimiter = ',', required = true)]
+        names: Vec<String>,
+        /// Output dtype: bf16 or f32.
+        #[arg(long, default_value = "bf16")]
+        dtype: String,
+        #[arg(long, short = 'o')]
+        out: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
     /// Write a new checkpoint with a feature added. Inputs are never modified.
     Surgery {
         #[command(subcommand)]
         op: SurgeryOp,
+    },
+    /// Training jobs: prepare a job spec, run it on the Python side with live
+    /// progress, and turn the result into a checkpoint.
+    Job {
+        #[command(subcommand)]
+        op: job::JobOp,
     },
     /// Write a tiny synthetic checkpoint, for trying the tool without a real model.
     #[command(hide = true)]
@@ -248,6 +270,7 @@ fn main() -> Result<()> {
             let opts = mb_surgery::mtp::MtpSidecarOptions {
                 overwrite: force,
                 reference_label: from.file_name().map(|n| n.to_string_lossy().into_owned()),
+                aligned_to_target: false,
             };
             let report = mb_surgery::mtp::port_mtp_sidecar(&t, &t_ir, &r, &r_ir, &out, &opts)?;
             if json {
@@ -256,6 +279,30 @@ fn main() -> Result<()> {
                 print!("{}", render::surgery(&report));
             }
         }
+        Command::ExportTensors {
+            model,
+            names,
+            dtype,
+            out,
+            force,
+        } => {
+            let dtype = match dtype.to_ascii_lowercase().as_str() {
+                "bf16" => mb_ir::DType::Bf16,
+                "f32" => mb_ir::DType::F32,
+                other => anyhow::bail!("unsupported dtype {other}; use bf16 or f32"),
+            };
+            let m =
+                mb_formats::open(&model).with_context(|| format!("opening {}", model.display()))?;
+            let ir = ModelIr::from_raw(m.raw.clone());
+            let opts = mb_surgery::export::ExportOptions {
+                names,
+                dtype,
+                overwrite: force,
+            };
+            let report = mb_surgery::export::export_primal(&m, &ir, &out, &opts)?;
+            print!("{}", render::surgery(&report));
+        }
+        Command::Job { op } => job::run(op)?,
         Command::Fixture { kind, out } => {
             let path = match kind {
                 FixtureKind::LlamaGqa => mb_fixtures::llama_gqa(&out),

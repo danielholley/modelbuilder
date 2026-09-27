@@ -4,6 +4,7 @@
 //! maps of the source checkpoints; only small transformed tensors (norms)
 //! are materialized.
 
+pub mod export;
 pub mod mtp;
 
 use std::path::PathBuf;

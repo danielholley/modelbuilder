@@ -1,0 +1,6 @@
+{"schema_version": 1, "event": "started", "time": 1790000000.0, "stage": null, "job_id": "mtp-align-example", "device": "cuda", "trainable_params": 424697856, "train_tokens": 1900000, "eval_tokens": 100000}
+{"schema_version": 1, "event": "progress", "time": 1790000010.5, "stage": "mtp-align", "step": 10, "steps": 2000, "tokens": 40960, "loss": 1.23, "accuracy": 0.71, "lr": 1e-05, "tokens_per_s": 3900.0}
+{"schema_version": 1, "event": "eval", "time": 1790000200.0, "stage": "mtp-align", "step": 200, "loss": 1.1, "accuracy": 0.74, "tokens": 100000}
+{"schema_version": 1, "event": "checkpoint", "time": 1790000201.0, "stage": "mtp-align", "step": 200, "path": "runs/mtp-align-example/mtp-head/model.safetensors"}
+{"schema_version": 1, "event": "finished", "time": 1790002000.0, "stage": null, "status": "ok", "outputs": {"mtp_head": "runs/mtp-align-example/mtp-head"}}
+{"schema_version": 1, "event": "error", "time": 1790002001.0, "stage": "mtp-align", "message": "example"}
