@@ -74,9 +74,37 @@ enum Command {
     },
     /// List the feature catalog and hardware profiles.
     Features,
+    /// Write a new checkpoint with a feature added. Inputs are never modified.
+    Surgery {
+        #[command(subcommand)]
+        op: SurgeryOp,
+    },
     /// Write a tiny synthetic checkpoint, for trying the tool without a real model.
     #[command(hide = true)]
     Fixture { kind: FixtureKind, out: PathBuf },
+}
+
+#[derive(Subcommand)]
+enum SurgeryOp {
+    /// Port an MTP head from a Hugging Face reference model into an MTP-only
+    /// GGUF sidecar for a qwen35 GGUF target (run it with `-md <sidecar>
+    /// --spec-type draft-mtp` in the PrismML llama.cpp fork).
+    Mtp {
+        /// Target model (.gguf), e.g. Ternary-Bonsai-2-27B-PQ2_0.gguf.
+        target: PathBuf,
+        /// Reference HF model directory with `mtp.*` tensors, e.g. Qwen3.8-27B.
+        #[arg(long)]
+        from: PathBuf,
+        /// Output sidecar path. Put "mtp" in the name so the fork can find it next to the model.
+        #[arg(long, short = 'o')]
+        out: PathBuf,
+        /// Replace the output if it exists.
+        #[arg(long)]
+        force: bool,
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -86,6 +114,7 @@ enum FixtureKind {
     DeepseekMlaMoe,
     GgufMixedQuant,
     GgufBonsaiLike,
+    QwenHybridMatchingBonsaiLike,
 }
 
 fn main() -> Result<()> {
@@ -199,6 +228,34 @@ fn main() -> Result<()> {
                 println!("  {:<13} {}", p.id, p.description);
             }
         }
+        Command::Surgery {
+            op:
+                SurgeryOp::Mtp {
+                    target,
+                    from,
+                    out,
+                    force,
+                    json,
+                },
+        } => {
+            let open = |p: &std::path::Path| -> Result<(mb_formats::LoadedModel, ModelIr)> {
+                let m = mb_formats::open(p).with_context(|| format!("opening {}", p.display()))?;
+                let ir = ModelIr::from_raw(m.raw.clone());
+                Ok((m, ir))
+            };
+            let (t, t_ir) = open(&target)?;
+            let (r, r_ir) = open(&from)?;
+            let opts = mb_surgery::mtp::MtpSidecarOptions {
+                overwrite: force,
+                reference_label: from.file_name().map(|n| n.to_string_lossy().into_owned()),
+            };
+            let report = mb_surgery::mtp::port_mtp_sidecar(&t, &t_ir, &r, &r_ir, &out, &opts)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", render::surgery(&report));
+            }
+        }
         Command::Fixture { kind, out } => {
             let path = match kind {
                 FixtureKind::LlamaGqa => mb_fixtures::llama_gqa(&out),
@@ -206,6 +263,9 @@ fn main() -> Result<()> {
                 FixtureKind::DeepseekMlaMoe => mb_fixtures::deepseek_mla_moe(&out),
                 FixtureKind::GgufMixedQuant => mb_fixtures::gguf_mixed_quant(&out),
                 FixtureKind::GgufBonsaiLike => mb_fixtures::gguf_bonsai_like(&out),
+                FixtureKind::QwenHybridMatchingBonsaiLike => {
+                    mb_fixtures::qwen_hybrid_matching_bonsai_like(&out)
+                }
             };
             println!("{}", path.display());
         }

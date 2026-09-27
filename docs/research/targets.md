@@ -69,6 +69,12 @@ include a head. The sibling 1-bit Bonsai 27B instead ships a **DSpark
 drafter**: 6 layers conditioned on hidden states tapped from 5 target layers,
 reported at a 1.37× decode speedup on H100.
 
+**Update, measured:** porting Qwen3.8's MTP head into an MTP-only sidecar
+(`modelbuilder surgery mtp`) works without retraining. The fork loads it as a
+`draft-mtp` draft; it accepted 64% of drafted tokens (44–84% per prompt) for a
+1.37–2.07× CPU decode speedup, and the output was identical to plain decoding.
+Details and a control run are in [`mtp-port.md`](mtp-port.md).
+
 ## DeepSeek-V4.1-Flash (arXiv 2609.19969)
 
 | Property | Value |

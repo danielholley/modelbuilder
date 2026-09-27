@@ -246,8 +246,22 @@ pub fn llama_gqa(dir: &Path) -> PathBuf {
 /// 3 × Gated DeltaNet + 1 × gated full attention (GQA), an MTP module, and a
 /// vision tower, nested under `text_config`, written as 2 shards.
 pub fn qwen_hybrid(dir: &Path) -> PathBuf {
-    let (hidden, heads, kv, hd, inter, vocab) = (64, 6, 2, 16, 160, 320);
-    let (lk_heads, lv_heads, lk_dim, lv_dim, conv) = (2, 6, 8, 8, 4);
+    qwen_hybrid_with(dir, (64, 6, 2, 16, 160, 320), (2, 6, 8, 8, 4))
+}
+
+/// The same HF layout with the dimensions of [`gguf_bonsai_like`], so an MTP
+/// head can be ported from one to the other (the Qwen3.8 → Bonsai 2 case).
+pub fn qwen_hybrid_matching_bonsai_like(dir: &Path) -> PathBuf {
+    qwen_hybrid_with(dir, (128, 4, 2, 32, 256, 256), (2, 4, 32, 32, 4))
+}
+
+/// `(hidden, heads, kv_heads, head_dim, intermediate, vocab)` and
+/// `(linear key heads, linear value heads, key dim, value dim, conv kernel)`.
+fn qwen_hybrid_with(
+    dir: &Path,
+    (hidden, heads, kv, hd, inter, vocab): (u64, u64, u64, u64, u64, u64),
+    (lk_heads, lv_heads, lk_dim, lv_dim, conv): (u64, u64, u64, u64, u64),
+) -> PathBuf {
     let layer_types: Vec<&str> = (0..8)
         .map(|i| {
             if i % 4 == 3 {
@@ -352,6 +366,16 @@ pub fn qwen_hybrid(dir: &Path) -> PathBuf {
             BF16,
             &[hidden, heads * hd],
         )
+        .add("mtp.layers.0.self_attn.q_norm.weight", BF16, &[hd])
+        .add("mtp.layers.0.self_attn.k_norm.weight", BF16, &[hd])
+        .add("mtp.layers.0.input_layernorm.weight", BF16, &[hidden])
+        .add(
+            "mtp.layers.0.post_attention_layernorm.weight",
+            BF16,
+            &[hidden],
+        )
+        .add("mtp.layers.0.mlp.gate_proj.weight", BF16, &[inter, hidden])
+        .add("mtp.layers.0.mlp.up_proj.weight", BF16, &[inter, hidden])
         .add("mtp.layers.0.mlp.down_proj.weight", BF16, &[hidden, inter])
         .add("mtp.norm.weight", BF16, &[hidden])
         .add(

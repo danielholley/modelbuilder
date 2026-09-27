@@ -22,8 +22,9 @@ wrong*. It then carries the change through to an exported model.
 
 The Rust core exists: `mb-ir`, `mb-formats`, `mb-analyze`, `mb-fixtures`,
 `mb-features` (plugin trait, three plugins, cost model), `mb-plan` (recipes and
-plans), and the `modelbuilder` binary with `inspect`, `stats`, `plan` and
-`features`. Surgery, training and the UIs are not built yet. Everything else in the layout below is
+plans), `mb-surgery` (MTP head port), and the `modelbuilder` binary with
+`inspect`, `stats`, `plan`, `features` and `surgery mtp`. Training and the UIs
+are not built yet. Everything else in the layout below is
 the target design, not code yet. Update this file when the real layout differs.
 
 Research on the first target (DeepSeek-V4.1-Flash KV techniques on Bonsai 2 27B)
@@ -51,6 +52,7 @@ cargo run --release -- stats <model> [--only substr,...] [--kv-spectra] [--top N
 cargo run -- plan <model> [-f id[:k=v,...]]... [--hardware ids] [--json]   # no -f: whole catalog
 cargo run -- plan --recipe examples/recipes/bonsai2-kv-and-mtp.toml
 cargo run -- features                        # catalog and hardware profiles
+cargo run --release -- surgery mtp <target.gguf> --from <hf-reference> -o <name>-mtp.gguf
 cargo run -- fixture qwen-hybrid /tmp/qh   # hidden: writes a tiny test checkpoint
 ```
 
@@ -109,7 +111,7 @@ Planned crates:
 | `mb-fixtures` ✅ | Tiny synthetic checkpoints for tests (Llama GQA, Qwen3.8-like hybrid, DeepSeek MLA+MoE, mixed-quant GGUF). |
 | `mb-features` ✅ | Feature plugin trait, hardware profiles, and the training cost model (`estimate`). Plugins: `fp4-kv`, `kv-share`, `mtp`. `surgery_outline` describes checkpoint changes; executing them belongs to `mb-surgery`. |
 | `mb-plan` ✅ | Recipe parsing (TOML) and plan assembly: detection, compatibility, estimates priced per hardware profile. Stage ordering across features is not built yet. |
-| `mb-surgery` | Applies feature transforms to produce a modified checkpoint. |
+| `mb-surgery` ✅ (MTP) | Writes new checkpoints with a feature added, streaming from the inputs' mmaps. `mtp::port_mtp_sidecar` ports an HF MTP head into an MTP-only GGUF sidecar for `qwen35` targets, following the PrismML fork's converter; see `docs/research/mtp-port.md` for how it was verified end to end. |
 | `mb-jobs` | Emits training job specs, launches and monitors the Python side. |
 | `mb-server` | Local web API (axum) that serves the React UI. |
 | `mb-tui` | Terminal dashboard (ratatui) for SSH and cloud boxes. |
