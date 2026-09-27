@@ -118,7 +118,7 @@ fn mtp_align(a: MtpAlignArgs) -> Result<()> {
     if !reference_config.is_file() {
         bail!("{} has no config.json", a.from.display());
     }
-    if !a.features.join("manifest.json").is_file() {
+    if !has_manifest(&a.features) {
         bail!(
             "{} is not a feature directory (no manifest.json); create one with \
              `python -m modelbuilder_train extract-features`",
@@ -330,4 +330,13 @@ pub fn render_event(rec: &EventRecord) -> Option<String> {
         Event::Error { message } => format!("{stage}error: {message}"),
     };
     Some(line)
+}
+
+/// A feature directory, or a directory of them (one per `extract-features --shard`).
+fn has_manifest(dir: &Path) -> bool {
+    dir.join("manifest.json").is_file()
+        || std::fs::read_dir(dir).is_ok_and(|rd| {
+            rd.flatten()
+                .any(|e| e.path().join("manifest.json").is_file())
+        })
 }

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -36,12 +37,100 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_extract(args: argparse.Namespace) -> int:
-    from modelbuilder_train.features import extract_llamacpp
+def _shard(s: str) -> tuple[int, int]:
+    i, _, n = s.partition("/")
+    shard = (int(i), int(n or 1))
+    if not 0 <= shard[0] < shard[1]:
+        raise argparse.ArgumentTypeError(f"shard {s}: use i/n with 0 <= i < n")
+    return shard
 
-    texts = [json.loads(line)["text"] for line in Path(args.texts).read_text().splitlines() if line.strip()]
-    manifest = extract_llamacpp(Path(args.llama_bin), Path(args.model), texts, Path(args.out), threads=args.threads)
-    print(f"wrote {manifest['total_tokens']} tokens in {manifest['total_sequences']} sequences to {args.out}")
+
+def _servers(args: argparse.Namespace, embeddings: bool):
+    """The servers to use: --server URLs, or one launched here from --llama-bin/--model."""
+    from modelbuilder_train.server import Server
+
+    if args.server:
+        return [Server(u) for u in args.server], []
+    if not (args.llama_bin and args.model):
+        raise SystemExit("give --server URL(s), or --llama-bin and --model to start one")
+    s = Server.launch(
+        Path(args.llama_bin),
+        Path(args.model),
+        port=args.port,
+        embeddings=embeddings,
+        parallel=args.parallel,
+        ctx=args.ctx,
+        threads=args.threads,
+        gpu_layers=args.gpu_layers,
+        log=Path(args.server_log) if args.server_log else None,
+    )
+    return [s], [s]
+
+
+def _progress(label: str):
+    t0 = time.time()
+
+    def show(done: int, total: int) -> None:
+        if done == total or done % 10 == 0:
+            rate = done / max(time.time() - t0, 1e-9)
+            print(f"{label}: {done}/{total} ({rate:.2f}/s)", file=sys.stderr, flush=True)
+
+    return show
+
+
+def cmd_corpus(args: argparse.Namespace) -> int:
+    from modelbuilder_train.server import generate_corpus, read_jsonl
+
+    servers, owned = _servers(args, embeddings=False)
+    try:
+        n = generate_corpus(
+            servers,
+            read_jsonl(Path(args.prompts)),
+            Path(args.out),
+            shard=args.shard,
+            max_tokens=args.max_tokens,
+            temperature=args.temperature,
+            workers=args.workers or args.parallel * len(servers),
+            seed=args.seed,
+            progress=_progress("generated"),
+        )
+    finally:
+        for s in owned:
+            s.close()
+    print(f"wrote {n} new samples to {args.out}")
+    return 0
+
+
+def cmd_extract(args: argparse.Namespace) -> int:
+    texts = [json.loads(line) for line in Path(args.texts).read_text().splitlines() if line.strip()]
+    if args.no_server:
+        from modelbuilder_train.features import extract_llamacpp
+
+        manifest = extract_llamacpp(
+            Path(args.llama_bin),
+            Path(args.model),
+            [t["text"] for t in texts],
+            Path(args.out),
+            threads=args.threads or 4,
+        )
+    else:
+        from modelbuilder_train.server import extract_features
+
+        servers, owned = _servers(args, embeddings=True)
+        try:
+            manifest = extract_features(
+                servers[0],
+                texts,
+                Path(args.out),
+                shard=args.shard,
+                max_tokens=args.ctx,
+                source={"model": str(args.model or args.server[0])},
+                progress=_progress("extracted"),
+            )
+        finally:
+            for s in owned:
+                s.close()
+    print(f"wrote {manifest['total_tokens']} tokens in {manifest['total_sequences']} sequences under {args.out}")
     return 0
 
 
@@ -79,12 +168,34 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("spec")
     v.set_defaults(fn=cmd_validate)
 
-    x = sub.add_parser("extract-features", help="compute trunk features with llama.cpp")
-    x.add_argument("--llama-bin", required=True, help="directory with llama-tokenize and llama-embedding")
-    x.add_argument("--model", required=True, help="target GGUF")
+    def server_args(p: argparse.ArgumentParser) -> None:
+        g = p.add_argument_group("llama-server (use running ones, or start one here)")
+        g.add_argument("--server", action="append", help="URL of a running llama-server (repeatable)")
+        g.add_argument("--llama-bin", help="directory with llama-server (the PrismML fork's build/bin)")
+        g.add_argument("--model", help="target GGUF")
+        g.add_argument("--port", type=int, default=8080)
+        g.add_argument("--parallel", type=int, default=4, help="server slots")
+        g.add_argument("--ctx", type=int, default=8192, help="context per slot (texts are cut to this)")
+        g.add_argument("--threads", type=int, help="CPU threads")
+        g.add_argument("--gpu-layers", type=int, help="layers to offload (-ngl); 99 for all")
+        g.add_argument("--server-log", help="file for the server's output")
+        p.add_argument("--shard", type=_shard, default=(0, 1), help="i/n: this machine's share of the input")
+
+    c = sub.add_parser("generate-corpus", help="the model's own answers to prompts, via llama-server")
+    c.add_argument("--prompts", required=True, help='JSONL: {"prompt": ...} or {"messages": [...]} per line')
+    c.add_argument("--out", required=True, help="JSONL to append to (resumes: finished ids are skipped)")
+    c.add_argument("--max-tokens", type=int, default=1024)
+    c.add_argument("--temperature", type=float, default=0.7)
+    c.add_argument("--workers", type=int, help="concurrent requests (default: slots × servers)")
+    c.add_argument("--seed", type=int, default=0)
+    server_args(c)
+    c.set_defaults(fn=cmd_corpus)
+
+    x = sub.add_parser("extract-features", help="trunk hidden states per token, via llama-server")
     x.add_argument("--texts", required=True, help='JSONL with {"text": ...} per line')
-    x.add_argument("--out", required=True)
-    x.add_argument("--threads", type=int, default=4)
+    x.add_argument("--out", required=True, help="writes out/shard-i-of-n; training reads the whole directory")
+    x.add_argument("--no-server", action="store_true", help="old mode: llama-tokenize + llama-embedding per text")
+    server_args(x)
     x.set_defaults(fn=cmd_extract)
 
     e = sub.add_parser("evaluate-mtp", help="top-1 accuracy of an MTP head on features")
