@@ -40,6 +40,13 @@ def pick_device(requested: str) -> torch.device:
     return torch.device("cpu")
 
 
+def supports_bf16(device: torch.device) -> bool:
+    """bf16 matmuls need Ampere (compute capability 8.0) or newer on CUDA; CPUs emulate them."""
+    if device.type == "cuda":
+        return torch.cuda.get_device_capability(device)[0] >= 8
+    return device.type == "cpu"
+
+
 def _chunk_ce(x: torch.Tensor, lm_head: torch.Tensor, targets: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     logits = (x.to(lm_head.dtype) @ lm_head.T).float()
     loss = F.cross_entropy(logits, targets, reduction="sum")
@@ -133,7 +140,12 @@ def run_mtp_align(
 
     from safetensors import safe_open
 
-    frozen_dtype = torch.bfloat16 if hyper.dtype == "bfloat16" else torch.float32
+    use_bf16 = hyper.dtype == "bfloat16" and supports_bf16(device)
+    if hyper.dtype == "bfloat16" and not use_bf16:
+        import sys
+
+        print(f"{device} has no fast bf16 (pre-Ampere GPU): training in float32", file=sys.stderr)
+    frozen_dtype = torch.bfloat16 if use_bf16 else torch.float32
     with safe_open(str(resolve(stage.frozen_tensors)), framework="pt") as f:
         emb = f.get_tensor(stage.embedding_tensor).to(device=device, dtype=frozen_dtype)
         lm_head = f.get_tensor(stage.lm_head_tensor).to(device=device, dtype=frozen_dtype)
@@ -157,7 +169,7 @@ def run_mtp_align(
     )
 
     opt = torch.optim.AdamW(head.parameters(), lr=hyper.lr, weight_decay=hyper.weight_decay)
-    autocast = hyper.dtype == "bfloat16" and device.type in ("cuda", "cpu")
+    autocast = use_bf16
     window = hyper.seq_len + 2
     tokens_seen, t0 = 0, time.time()
     out_head = out_dir / "mtp-head"
