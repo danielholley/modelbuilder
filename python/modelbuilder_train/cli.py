@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import traceback
@@ -14,7 +15,13 @@ from modelbuilder_train.spec import JobSpec
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    stream = sys.stdout if args.events == "-" else open(args.events, "a")  # noqa: SIM115
+    from modelbuilder_train import dist
+
+    # Under torchrun only rank 0 reports; the others' events would be duplicates.
+    if not dist.is_main():
+        stream = open(os.devnull, "w")  # noqa: SIM115
+    else:
+        stream = sys.stdout if args.events == "-" else open(args.events, "a")  # noqa: SIM115
     ev = EventWriter(stream)
     try:
         spec = JobSpec.load(args.spec)

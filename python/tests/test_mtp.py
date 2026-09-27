@@ -142,3 +142,36 @@ def test_failures_become_error_events(tiny):
     assert code == 1
     assert [e["event"] for e in events] == ["error", "finished"]
     assert events[-1]["status"] == "failed"
+
+
+def test_data_parallel_under_torchrun(tiny):
+    """Two CPU ranks (gloo): one event stream from rank 0, one saved head, and it still learns."""
+    path = tiny["dir"] / "job.json"
+    path.write_text(json.dumps(job(tiny, steps=40)))
+    r = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--standalone",
+            "--nproc-per-node",
+            "2",
+            "-m",
+            "modelbuilder_train",
+            "run",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert r.returncode == 0, r.stderr[-3000:]
+    events = [json.loads(line) for line in r.stdout.splitlines() if line.startswith("{")]
+    kinds = [e["event"] for e in events]
+    assert kinds.count("started") == 1 and kinds.count("finished") == 1, kinds
+    assert events[-1]["status"] == "ok"
+    evals = [e for e in events if e["event"] == "eval"]
+    assert evals[-1]["loss"] < evals[0]["loss"]
+    progress = [e for e in events if e["event"] == "progress"]
+    # Tokens count both ranks' windows.
+    assert progress[-1]["tokens"] == 2 * 40 * 2 * 16
