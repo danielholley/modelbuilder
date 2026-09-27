@@ -194,10 +194,12 @@ impl Feature for Mtp {
         ];
         if let Some(r) = &ctx.ir.weight_rotation {
             out.push(format!(
-                "Rotation: fold the block's attention/FFN weights into the {} basis with the existing sign vectors and append them to {}.weight_names. nextn.eh_proj (input width 2h) is not a foldable kind and has no sign vector: store it unrotated.",
-                r.scheme, r.metadata_prefix
+                "Rotation: a BF16 port stays unrotated (not listed in {p}.weight_names, so it gets a plain matmul). A ternary head after training must be folded into the {} basis with the existing sign vectors and listed in {p}.weight_names; nextn.eh_proj (input width 2h) is not a foldable kind and has no sign vector, so it stays unrotated either way.",
+                r.scheme,
+                p = r.metadata_prefix
             ));
         }
+        out.push("Implemented for qwen35 GGUF targets as an MTP-only sidecar: `modelbuilder surgery mtp <target.gguf> --from <reference> -o <name>-mtp.gguf`.".into());
         Ok(out)
     }
 

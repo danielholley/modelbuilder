@@ -479,3 +479,34 @@ pub fn plan(p: &mb_plan::Plan) -> String {
     }
     s
 }
+
+pub fn surgery(r: &mb_surgery::SurgeryReport) -> String {
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "WROTE {} ({})",
+        r.output.display(),
+        bytes(r.bytes as f64)
+    );
+    let _ = writeln!(s, "\nTENSORS");
+    for t in &r.tensors {
+        let _ = writeln!(
+            s,
+            "  {:<36} {:<6} {:<16} {} [{}]",
+            t.name,
+            t.dtype,
+            format!("{:?}", t.shape),
+            t.source,
+            t.transform
+        );
+    }
+    let _ = writeln!(s, "\nMETADATA");
+    for m in &r.metadata {
+        let _ = writeln!(s, "  {m}");
+    }
+    let _ = writeln!(s, "\nNOTES");
+    for n in &r.notes {
+        let _ = writeln!(s, "  {n}");
+    }
+    s
+}

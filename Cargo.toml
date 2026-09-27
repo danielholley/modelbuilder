@@ -15,6 +15,7 @@ mb-analyze = { path = "crates/mb-analyze" }
 mb-features = { path = "crates/mb-features" }
 mb-fixtures = { path = "crates/mb-fixtures" }
 mb-plan = { path = "crates/mb-plan" }
+mb-surgery = { path = "crates/mb-surgery" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 memmap2 = "0.9"

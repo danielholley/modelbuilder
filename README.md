@@ -5,8 +5,8 @@ A tool for taking LLM checkpoints apart and rebuilding them with new features
 Given a model, it shows what the model contains and what it was trained for,
 and what adding a feature would cost.
 
-Status: early. `inspect`, `stats` and `plan` work. Surgery, training and
-the dashboards are still to come. See `CLAUDE.md` for the design and
+Status: early. `inspect`, `stats`, `plan` and the first surgery (`surgery mtp`)
+work. Training and the dashboards are still to come. See `CLAUDE.md` for the design and
 `docs/research/targets.md` for the first target (Bonsai 2 27B).
 
 ## Build and test
@@ -71,6 +71,26 @@ cargo run --release -- plan path/to/model.gguf          # everything, all profil
 cargo run --release -- plan path/to/model.gguf -f kv-share:group=2 -f mtp:from=path/to/base --hardware 1x24GB,8xH100
 cargo run --release -- plan --recipe examples/recipes/bonsai2-kv-and-mtp.toml --json
 ```
+
+## Surgery: add an MTP head to Bonsai 2
+
+`surgery mtp` ports the multi-token-prediction head from Qwen3.8-27B into an
+MTP-only GGUF sidecar for Ternary-Bonsai-2-27B. The sidecar holds about
+1.4 GB of weights and is written in seconds; the 7.2 GB model file isn't
+touched. PrismML's llama.cpp fork uses the sidecar as a speculative-decoding
+draft (results in `docs/research/mtp-port.md`):
+
+```sh
+cargo run --release -- surgery mtp models/Ternary-Bonsai-2-27B-PQ2_0.gguf \
+    --from models/Qwen3.8-27B -o models/Ternary-Bonsai-2-27B-mtp.gguf
+
+# with the PrismML fork (https://github.com/PrismML-Eng/llama.cpp):
+llama-cli -m models/Ternary-Bonsai-2-27B-PQ2_0.gguf \
+    -md models/Ternary-Bonsai-2-27B-mtp.gguf --spec-type draft-mtp
+```
+
+The reference only needs its `mtp.*` tensors and `config.json`, not the whole
+checkpoint. Header-only or sparse copies work.
 
 Options for `inspect`: `--json` prints the full report as JSON, `--tensors` lists every
 tensor with its role, and `--context N` sets the context length used for the
