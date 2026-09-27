@@ -65,12 +65,17 @@ fn safetensors_sharded_to_single_file() {
 #[test]
 fn gguf_is_byte_identical_after_rewrite() {
     let dir = tempfile::tempdir().unwrap();
-    let path = mb_fixtures::gguf_mixed_quant(dir.path());
-    let src = mb_formats::open(&path).unwrap();
+    assert_gguf_round_trip(&mb_fixtures::gguf_mixed_quant(dir.path()));
+    assert_gguf_round_trip(&mb_fixtures::gguf_bonsai_like(dir.path()));
+}
+
+fn assert_gguf_round_trip(path: &std::path::Path) {
+    let dir = tempfile::tempdir().unwrap();
+    let src = mb_formats::open(path).unwrap();
     let Metadata::Gguf { kv, .. } = &src.raw.metadata else {
         panic!()
     };
     let out = dir.path().join("rewritten.gguf");
     gguf::write(&out, kv, &rewrite(&src)).unwrap();
-    assert_eq!(std::fs::read(&path).unwrap(), std::fs::read(&out).unwrap());
+    assert_eq!(std::fs::read(path).unwrap(), std::fs::read(&out).unwrap());
 }
