@@ -1,0 +1,27 @@
+# Plan FP4 KV, cross-layer KV sharing and an MTP head for Bonsai 2 27B.
+#
+#   cargo run --release -- plan --recipe examples/recipes/bonsai2-kv-and-mtp.toml
+#
+# Paths are placeholders: point them at your downloads. `plan` only reads
+# headers, so sparse or header-only copies are enough.
+
+[source]
+path = "models/Ternary-Bonsai-2-27B-PQ2_0.gguf"
+
+[hardware]
+profiles = ["1x24GB", "1x80GB", "8xH100"]
+
+[[feature]]
+id = "fp4-kv"
+mode = "qat"          # or "ptq": runtime-only, no training
+
+[[feature]]
+id = "kv-share"
+group = 2             # global-attention layers per shared KV
+
+[[feature]]
+id = "mtp"
+from = "models/Qwen3.8-27B"   # port the base model's MTP head
+
+[export]
+formats = ["gguf"]
