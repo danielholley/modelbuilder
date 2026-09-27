@@ -32,6 +32,9 @@ binary with `inspect`, `stats`, `plan`, `features`, `surgery mtp`,
 Everything else in the layout below is
 the target design, not code yet. Update this file when the real layout differs.
 
+What's done, what's measured, and the plan for the next work are in
+`docs/STATUS.md`. Keep it current when a piece of the plan lands.
+
 Research on the first target (DeepSeek-V4.1-Flash KV techniques on Bonsai 2 27B)
 is in `docs/research/targets.md`. Read it before working on attention, KV, or
 MTP plugins. It was checked against the paper, model cards, and real file
