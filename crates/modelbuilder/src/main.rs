@@ -52,6 +52,28 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Evaluate features against a model: already present? compatible? what
+    /// it changes, what training it needs, and what that costs per hardware
+    /// profile. With no --feature, evaluates the whole catalog.
+    Plan {
+        /// The model (optional with --recipe, which names its source).
+        path: Option<PathBuf>,
+        /// A recipe file (TOML) listing source, hardware and features.
+        #[arg(long)]
+        recipe: Option<PathBuf>,
+        /// Feature spec, `id` or `id:key=value,...` (repeatable), e.g.
+        /// `kv-share:group=2` or `mtp:from=models/Qwen3.8-27B`.
+        #[arg(long = "feature", short = 'f')]
+        features: Vec<String>,
+        /// Hardware profiles (comma-separated); default: all.
+        #[arg(long, value_delimiter = ',')]
+        hardware: Vec<String>,
+        /// Print the plan as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the feature catalog and hardware profiles.
+    Features,
     /// Write a tiny synthetic checkpoint, for trying the tool without a real model.
     #[command(hide = true)]
     Fixture { kind: FixtureKind, out: PathBuf },
@@ -111,6 +133,70 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 print!("{}", render::weight_stats(&report, &ir, top));
+            }
+        }
+        Command::Plan {
+            path,
+            recipe,
+            features,
+            hardware,
+            json,
+        } => {
+            let (source, mut requests, mut hw_ids) = match &recipe {
+                Some(r) => {
+                    let text = std::fs::read_to_string(r)
+                        .with_context(|| format!("reading {}", r.display()))?;
+                    let recipe = mb_plan::Recipe::parse(&text)?;
+                    let hw = recipe.hardware_ids();
+                    (PathBuf::from(&recipe.source.path), recipe.features, hw)
+                }
+                None => (
+                    path.clone().context("give a model path or --recipe")?,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            };
+            let source = path.unwrap_or(source);
+            requests.extend(features.iter().map(|f| mb_plan::parse_feature_spec(f)));
+            if !hardware.is_empty() {
+                hw_ids = hardware;
+            }
+            let hw = mb_plan::resolve_hardware(&hw_ids)?;
+
+            let open_ir = |p: &std::path::Path| -> Result<ModelIr> {
+                let m = mb_formats::open(p).with_context(|| format!("opening {}", p.display()))?;
+                Ok(ModelIr::from_raw(m.raw))
+            };
+            let ir = open_ir(&source)?;
+            // A feature's `from` names a reference model (e.g. the base to port an MTP head from).
+            let reference_path = requests.iter().find_map(|r| {
+                r.params
+                    .get("from")
+                    .and_then(|v| v.as_str())
+                    .map(PathBuf::from)
+            });
+            let reference = reference_path.as_deref().map(open_ir).transpose()?;
+            let ctx = mb_features::Context::new(&ir, reference.as_ref());
+            let plan = mb_plan::plan(&ctx, &requests, &hw)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&plan)?);
+            } else {
+                print!("{}", render::plan(&plan));
+            }
+        }
+        Command::Features => {
+            println!("FEATURES");
+            for f in mb_features::catalog() {
+                println!(
+                    "  {:<10} {}\n             {}",
+                    f.id(),
+                    f.title(),
+                    f.summary()
+                );
+            }
+            println!("\nHARDWARE PROFILES");
+            for p in mb_features::hardware::profiles() {
+                println!("  {:<13} {}", p.id, p.description);
             }
         }
         Command::Fixture { kind, out } => {

@@ -20,8 +20,10 @@ wrong*. It then carries the change through to an exported model.
 
 ## Status
 
-The Rust core exists: `mb-ir`, `mb-formats`, `mb-analyze`, `mb-fixtures`, and
-the `modelbuilder` binary with `inspect` and `stats`. Everything else in the layout below is
+The Rust core exists: `mb-ir`, `mb-formats`, `mb-analyze`, `mb-fixtures`,
+`mb-features` (plugin trait, three plugins, cost model), `mb-plan` (recipes and
+plans), and the `modelbuilder` binary with `inspect`, `stats`, `plan` and
+`features`. Surgery, training and the UIs are not built yet. Everything else in the layout below is
 the target design, not code yet. Update this file when the real layout differs.
 
 Research on the first target (DeepSeek-V4.1-Flash KV techniques on Bonsai 2 27B)
@@ -46,6 +48,9 @@ cargo test --workspace
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings
 cargo run -- inspect <model.gguf | hf-dir> [--json] [--tensors] [--context N]
 cargo run --release -- stats <model> [--only substr,...] [--kv-spectra] [--top N] [--json]
+cargo run -- plan <model> [-f id[:k=v,...]]... [--hardware ids] [--json]   # no -f: whole catalog
+cargo run -- plan --recipe examples/recipes/bonsai2-kv-and-mtp.toml
+cargo run -- features                        # catalog and hardware profiles
 cargo run -- fixture qwen-hybrid /tmp/qh   # hidden: writes a tiny test checkpoint
 ```
 
@@ -102,8 +107,8 @@ Planned crates:
 | `mb-formats` ✅ | Readers and writers for **HF safetensors + config.json** and **GGUF**. Uses mmap and streaming, and never materializes a full model. `dequant` decodes F32/F16/BF16/Q8_0/PQ2_0/PTQ1_0 to f32 one tensor at a time. |
 | `mb-analyze` ✅ | Static, metadata/provenance, KV-cache, and weight-statistics analyzers. `weights` streams tensors a chunk of rows at a time: moments, kurtosis and channel outliers in the primal basis; zeros and ternary structure in the stored basis; K/V singular-value spectra (`nalgebra`). Activation-aware statistics need calibration data and belong to the Python side. |
 | `mb-fixtures` ✅ | Tiny synthetic checkpoints for tests (Llama GQA, Qwen3.8-like hybrid, DeepSeek MLA+MoE, mixed-quant GGUF). |
-| `mb-features` | Feature plugin trait plus the built-in features. |
-| `mb-plan` | Recipe parsing, compatibility resolution, stage ordering, and cost models. |
+| `mb-features` ✅ | Feature plugin trait, hardware profiles, and the training cost model (`estimate`). Plugins: `fp4-kv`, `kv-share`, `mtp`. `surgery_outline` describes checkpoint changes; executing them belongs to `mb-surgery`. |
+| `mb-plan` ✅ | Recipe parsing (TOML) and plan assembly: detection, compatibility, estimates priced per hardware profile. Stage ordering across features is not built yet. |
 | `mb-surgery` | Applies feature transforms to produce a modified checkpoint. |
 | `mb-jobs` | Emits training job specs, launches and monitors the Python side. |
 | `mb-server` | Local web API (axum) that serves the React UI. |
@@ -187,27 +192,40 @@ what that source actually specifies, not on what the name suggests.
 
 ## Recipes
 
-Users compose features in a declarative recipe file (TOML). The UIs read and
-write the same recipe format. A sketch:
+Users compose features in a declarative recipe file (TOML); the UIs will read
+and write the same format. `mb_plan::Recipe` defines it, and
+`examples/recipes/bonsai2-kv-and-mtp.toml` is a working example (a test keeps it
+valid). Every key in a `[[feature]]` table other than `id` is passed to the
+plugin as a parameter, and each plugin rejects unknown keys.
 
 ```toml
 [source]
-path = "models/bonsai-2-27b"
+path = "models/Ternary-Bonsai-2-27B-PQ2_0.gguf"
 
 [hardware]
-profile = "1x24GB"   # or "8xH100", "m3-max-128gb", ...
+profiles = ["1x24GB", "8xH100"]   # `modelbuilder features` lists them
 
 [[feature]]
 id = "mtp"
-depth = 1
+from = "models/Qwen3.8-27B"       # reference model to port the head from
 
 [[feature]]
-id = "mla"
-kv_lora_rank = 512
-
-[export]
-formats = ["safetensors", "gguf"]
+id = "kv-share"
+group = 2
 ```
+
+### Writing a feature plugin
+
+- Implement `mb_features::Feature` in `crates/mb-features/src/features/` and
+  add it to `CATALOG`.
+- Parameters are a typed struct with `#[serde(deny_unknown_fields, default)]`,
+  parsed with `parse_params`.
+- `estimate` returns `Stage`s (what trains, how many tokens, the loss, the
+  data), not hours: `estimate::cost` prices them per hardware profile.
+- Every estimate lists its assumptions, a `Confidence`, and `references` to
+  the paper sections or source files it follows. Token budgets that aren't
+  from a source are called heuristics in the assumptions.
+- Test it in `crates/mb-plan/tests/plan.rs` against the fixtures.
 
 ## Hard constraints
 

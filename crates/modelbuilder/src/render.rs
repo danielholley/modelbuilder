@@ -329,3 +329,153 @@ pub fn weight_stats(r: &WeightStatsReport, ir: &ModelIr, top: usize) -> String {
     }
     s
 }
+
+fn range_count(r: mb_features::Range) -> String {
+    if r.low == r.high {
+        count(r.low as u64)
+    } else {
+        format!("{}–{}", count(r.low as u64), count(r.high as u64))
+    }
+}
+
+fn hours(r: mb_features::Range) -> String {
+    let f = |h: f64| {
+        if h < 1.0 {
+            format!("{:.1}", h)
+        } else {
+            format!("{:.0}", h)
+        }
+    };
+    format!("{}–{}", f(r.low), f(r.high))
+}
+
+fn effect_value(v: f64, unit: &str) -> String {
+    if unit == "bytes" {
+        bytes(v)
+    } else {
+        count(v as u64)
+    }
+}
+
+pub fn plan(p: &mb_plan::Plan) -> String {
+    use mb_features::estimate::Fit;
+    let mut s = String::new();
+    let _ = writeln!(s, "PLAN  {}", p.model);
+    let _ = writeln!(
+        s,
+        "hardware: {}\n",
+        p.hardware
+            .iter()
+            .map(|h| h.id)
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    for (i, f) in p.features.iter().enumerate() {
+        let params = if f.params.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", serde_json::Value::Object(f.params.clone()))
+        };
+        let _ = writeln!(s, "[{}] {} ({}){params}", i + 1, f.title, f.id);
+        let _ = writeln!(s, "    {}", f.summary);
+        let detected = match &f.detection {
+            mb_features::Detection::Absent => "not present".to_string(),
+            mb_features::Detection::Present(d) => format!("already present: {d}"),
+            mb_features::Detection::Partial(d) => format!("partly present: {d}"),
+        };
+        let _ = writeln!(s, "    model:      {detected}");
+        if f.compat.ok() {
+            let _ = writeln!(s, "    compatible: yes");
+        } else {
+            let _ = writeln!(s, "    compatible: NO");
+            for b in &f.compat.blockers {
+                let _ = writeln!(s, "      ✗ {b}");
+            }
+        }
+        for w in &f.compat.warnings {
+            let _ = writeln!(s, "      ! {w}");
+        }
+        if let Some(e) = &f.estimate {
+            for ef in &e.effects {
+                let _ = writeln!(
+                    s,
+                    "    effect:     {}: {} → {}",
+                    ef.metric,
+                    effect_value(ef.before, &ef.unit),
+                    effect_value(ef.after, &ef.unit)
+                );
+            }
+            if e.stages.is_empty() {
+                let _ = writeln!(s, "    training:   none");
+            }
+            for st in &e.stages {
+                let _ = writeln!(
+                    s,
+                    "    training:   {} — {}\n                {} trainable params, {} tokens at {} seq; loss: {}\n                data: {}",
+                    st.name,
+                    st.what,
+                    count(st.trainable_params),
+                    range_count(st.tokens),
+                    st.seq_len,
+                    st.loss,
+                    st.data
+                );
+            }
+            if !e.stages.is_empty() {
+                let _ = writeln!(
+                    s,
+                    "    compute:    {:<13} {:>12} {:>12} {:>16}  fits",
+                    "profile", "GPU-hours", "wall-hours", "peak GiB/GPU"
+                );
+                for c in &f.compute {
+                    let fits = match c.fits {
+                        Fit::Yes => "yes",
+                        Fit::WithPackedTrunk => "only with packed trunk",
+                        Fit::No => "no",
+                        Fit::NotApplicable => "-",
+                    };
+                    let _ = writeln!(
+                        s,
+                        "                {:<13} {:>12} {:>12} {:>7.0} / {:<6.0}  {fits}",
+                        c.profile,
+                        hours(c.gpu_hours),
+                        hours(c.wall_hours),
+                        c.peak_gib_per_gpu,
+                        c.peak_gib_per_gpu_packed_trunk
+                    );
+                }
+                let _ = writeln!(
+                    s,
+                    "                (peak GiB: BF16 trunk / trunk kept packed)"
+                );
+            }
+            let _ = writeln!(
+                s,
+                "    risk:       {:?} — {}",
+                e.risk.level, e.risk.expected
+            );
+            let _ = writeln!(s, "                recovery: {}", e.risk.recovery);
+            let _ = writeln!(s, "    confidence: {:?}", e.confidence);
+            for a in &e.assumptions {
+                let _ = writeln!(s, "    assumes:    {a}");
+            }
+        }
+        for x in &f.surgery {
+            let _ = writeln!(s, "    surgery:    {x}");
+        }
+        for x in &f.export_notes {
+            let _ = writeln!(s, "    runtime:    {x}");
+        }
+        if let Some(e) = &f.estimate {
+            for r in &e.references {
+                let _ = writeln!(s, "    source:     {r}");
+            }
+        }
+        let _ = writeln!(s);
+    }
+    let _ = writeln!(s, "COST MODEL");
+    for a in &p.cost_model_assumptions {
+        let _ = writeln!(s, "  {a}");
+    }
+    s
+}

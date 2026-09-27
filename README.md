@@ -5,8 +5,8 @@ A tool for taking LLM checkpoints apart and rebuilding them with new features
 Given a model, it shows what the model contains and what it was trained for,
 and what adding a feature would cost.
 
-Status: early. `modelbuilder inspect` and `modelbuilder stats` work. Planning, surgery, and training
-are still to come. See `CLAUDE.md` for the design and
+Status: early. `inspect`, `stats` and `plan` work. Surgery, training and
+the dashboards are still to come. See `CLAUDE.md` for the design and
 `docs/research/targets.md` for the first target (Bonsai 2 27B).
 
 ## Build and test
@@ -52,6 +52,24 @@ singular-value spectra:
 ```sh
 cargo run --release -- stats path/to/model.gguf --kv-spectra
 cargo run --release -- stats path/to/model.gguf --only attn_k.,attn_v. --json
+```
+
+## What could I add, and what would it cost?
+
+`plan` evaluates features against a model. For each one it reports:
+- whether the model already has it, and whether it's compatible;
+- what changes (e.g. KV bytes per token);
+- the training stages needed;
+- GPU-hours and memory per hardware profile;
+- the quality risk, the assumptions, and a confidence level.
+
+With no `-f`, it evaluates the whole catalog.
+
+```sh
+cargo run -- features                                   # catalog + hardware profiles
+cargo run --release -- plan path/to/model.gguf          # everything, all profiles
+cargo run --release -- plan path/to/model.gguf -f kv-share:group=2 -f mtp:from=path/to/base --hardware 1x24GB,8xH100
+cargo run --release -- plan --recipe examples/recipes/bonsai2-kv-and-mtp.toml --json
 ```
 
 Options for `inspect`: `--json` prints the full report as JSON, `--tensors` lists every
