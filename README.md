@@ -121,6 +121,8 @@ cargo run --release -- job mtp-align models/Ternary-Bonsai-2-27B-PQ2_0.gguf \
     --python python/.venv/bin/python --steps 2000
 ```
 
+For a real run on a cluster, see [`docs/runbooks/bonsai2-mtp.md`](docs/runbooks/bonsai2-mtp.md). It covers corpus generation with llama-server, sharded extraction, `torchrun` training (DDP, fp32 on pre-Ampere GPUs such as P40s) and `bench-draft`.
+
 `--emit-only` stops after writing `runs/<name>/job.json`. Copy the run
 directory to a GPU machine and run `modelbuilder job run job.json` (or
 `python -m modelbuilder_train run job.json`) there.

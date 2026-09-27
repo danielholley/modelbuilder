@@ -90,6 +90,31 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Export a qwen35 GGUF (e.g. Ternary-Bonsai-2-27B) as a Hugging Face
+    /// checkpoint for PyTorch: decoded, un-rotated, with the converter's
+    /// tensor transforms undone. Needs the reference HF model's config.json.
+    ExportHf {
+        model: PathBuf,
+        /// Reference HF model directory (config.json, tokenizer), e.g. Qwen3.8-27B.
+        #[arg(long)]
+        reference: PathBuf,
+        #[arg(long, short = 'o')]
+        out: PathBuf,
+        /// bf16 or f32 for the large weights.
+        #[arg(long, default_value = "bf16")]
+        dtype: String,
+        /// Shard size in GiB.
+        #[arg(long, default_value_t = 5.0)]
+        shard_gib: f64,
+        /// Only these decoder layers, `start..end` (for validation).
+        #[arg(long)]
+        layers: Option<String>,
+        /// With --layers: leave out the embedding, final norm and LM head.
+        #[arg(long)]
+        no_globals: bool,
+        #[arg(long)]
+        force: bool,
+    },
     /// Write a new checkpoint with a feature added. Inputs are never modified.
     Surgery {
         #[command(subcommand)]
@@ -313,6 +338,41 @@ fn main() -> Result<()> {
             } else {
                 print!("{}", render::surgery(&report));
             }
+        }
+        Command::ExportHf {
+            model,
+            reference,
+            out,
+            dtype,
+            shard_gib,
+            layers,
+            no_globals,
+            force,
+        } => {
+            let dtype = match dtype.to_ascii_lowercase().as_str() {
+                "bf16" => mb_ir::DType::Bf16,
+                "f32" => mb_ir::DType::F32,
+                other => anyhow::bail!("unsupported dtype {other}; use bf16 or f32"),
+            };
+            let layers = layers
+                .map(|s| -> Result<(u32, u32)> {
+                    let (a, b) = s.split_once("..").context("--layers takes start..end")?;
+                    Ok((a.parse()?, b.parse()?))
+                })
+                .transpose()?;
+            let m =
+                mb_formats::open(&model).with_context(|| format!("opening {}", model.display()))?;
+            let ir = ModelIr::from_raw(m.raw.clone());
+            let opts = mb_surgery::hf_export::HfExportOptions {
+                reference,
+                dtype,
+                shard_bytes: (shard_gib * (1u64 << 30) as f64) as u64,
+                layers,
+                globals: !no_globals,
+                overwrite: force,
+            };
+            let report = mb_surgery::hf_export::export_hf(&m, &ir, &out, &opts)?;
+            print!("{}", render::surgery(&report));
         }
         Command::ExportTensors {
             model,

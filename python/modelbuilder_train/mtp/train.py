@@ -9,6 +9,7 @@ window of tokens ``x[0..L]`` with hidden states ``h[0..L]`` gives the pairs
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import random
@@ -21,6 +22,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
+from modelbuilder_train import dist
 from modelbuilder_train.events import EventWriter
 from modelbuilder_train.features import FeatureSet, SequenceRef
 from modelbuilder_train.mtp.model import MtpConfig, MtpHead, load_mtp_state, save_mtp_state
@@ -38,6 +40,13 @@ def pick_device(requested: str) -> torch.device:
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def supports_bf16(device: torch.device) -> bool:
+    """bf16 matmuls need Ampere (compute capability 8.0) or newer on CUDA; CPUs emulate them."""
+    if device.type == "cuda":
+        return torch.cuda.get_device_capability(device)[0] >= 8
+    return device.type == "cpu"
 
 
 def _chunk_ce(x: torch.Tensor, lm_head: torch.Tensor, targets: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -120,8 +129,8 @@ def _files(path: Path) -> list[Path]:
 def run_mtp_align(
     stage: MtpAlign, hyper: Hyper, resolve, out_dir: Path, device: torch.device, ev: EventWriter, job_id: str
 ) -> dict:
-    torch.manual_seed(hyper.seed)
-    rng = random.Random(hyper.seed)
+    torch.manual_seed(hyper.seed)  # the same initial head on every rank
+    rng = random.Random(hyper.seed + 1_000_003 * dist.rank())  # different windows per rank
 
     ref_config_path = resolve(stage.reference_config)
     cfg = MtpConfig.from_hf_config(json.loads(ref_config_path.read_text()))
@@ -133,7 +142,12 @@ def run_mtp_align(
 
     from safetensors import safe_open
 
-    frozen_dtype = torch.bfloat16 if hyper.dtype == "bfloat16" else torch.float32
+    use_bf16 = hyper.dtype == "bfloat16" and supports_bf16(device)
+    if hyper.dtype == "bfloat16" and not use_bf16:
+        import sys
+
+        print(f"{device} has no fast bf16 (pre-Ampere GPU): training in float32", file=sys.stderr)
+    frozen_dtype = torch.bfloat16 if use_bf16 else torch.float32
     with safe_open(str(resolve(stage.frozen_tensors)), framework="pt") as f:
         emb = f.get_tensor(stage.embedding_tensor).to(device=device, dtype=frozen_dtype)
         lm_head = f.get_tensor(stage.lm_head_tensor).to(device=device, dtype=frozen_dtype)
@@ -156,19 +170,22 @@ def run_mtp_align(
         eval_tokens=sum(s.length for s in sp.eval),
     )
 
+    model = dist.wrap(head, device)
     opt = torch.optim.AdamW(head.parameters(), lr=hyper.lr, weight_decay=hyper.weight_decay)
-    autocast = hyper.dtype == "bfloat16" and device.type in ("cuda", "cpu")
+    autocast = use_bf16
     window = hyper.seq_len + 2
     tokens_seen, t0 = 0, time.time()
     out_head = out_dir / "mtp-head"
 
     def save(step: int) -> None:
+        if not dist.is_main():
+            return
         out_head.mkdir(parents=True, exist_ok=True)
         save_mtp_state(head, out_head / "model.safetensors")
         shutil.copyfile(ref_config_path, out_head / "config.json")
         ev.emit("checkpoint", step=step, path=str(out_head / "model.safetensors"))
 
-    if sp.eval:
+    if sp.eval and dist.is_main():
         # Baseline: how well the initial (e.g. ported) head already drafts.
         ev.emit("eval", step=0, **evaluate(head, emb, lm_head, features, sp.eval, hyper.seq_len, device))
 
@@ -184,11 +201,16 @@ def run_mtp_align(
             a = rng.randrange(0, max(1, ref.length - window + 1))
             windows.append((ref, a, min(ref.length, a + window)))
         n_targets = sum(b - a - 2 for _, a, b in windows)
-        for ref, a, b in windows:
+        for w, (ref, a, b) in enumerate(windows):
             tokens, hidden = features.get(ref, a, b)
-            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=autocast):
-                loss, correct, count = head_loss(head, emb, lm_head, tokens.to(device), hidden.to(device))
-            (loss / n_targets).backward()
+            # Gradients are all-reduced once per step, on the last window.
+            sync = w == len(windows) - 1 or not hasattr(model, "no_sync")
+            with (
+                contextlib.nullcontext() if sync else model.no_sync(),
+                torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=autocast),
+            ):
+                loss, correct, count = head_loss(model, emb, lm_head, tokens.to(device), hidden.to(device))
+                (loss / n_targets).backward()
             batch_loss, batch_correct, batch_count = (
                 batch_loss + float(loss.detach()),
                 batch_correct + correct,
@@ -197,9 +219,9 @@ def run_mtp_align(
         if hyper.grad_clip:
             torch.nn.utils.clip_grad_norm_(head.parameters(), hyper.grad_clip)
         opt.step()
-        tokens_seen += batch_count
+        tokens_seen += batch_count * dist.world()
 
-        if step % hyper.log_every == 0 or step == hyper.steps:
+        if dist.is_main() and (step % hyper.log_every == 0 or step == hyper.steps):
             ev.emit(
                 "progress",
                 step=step,
@@ -210,7 +232,7 @@ def run_mtp_align(
                 lr=lr,
                 tokens_per_s=tokens_seen / max(time.time() - t0, 1e-9),
             )
-        if sp.eval and (step % hyper.eval_every == 0 or step == hyper.steps):
+        if sp.eval and dist.is_main() and (step % hyper.eval_every == 0 or step == hyper.steps):
             ev.emit("eval", step=step, **evaluate(head, emb, lm_head, features, sp.eval, hyper.seq_len, device))
 
     save(hyper.steps)

@@ -5,6 +5,7 @@
 //! are materialized.
 
 pub mod export;
+pub mod hf_export;
 pub mod mtp;
 
 use std::path::PathBuf;

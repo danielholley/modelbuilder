@@ -102,22 +102,42 @@ class SequenceRef:
 
 
 class FeatureSet:
-    """Read access to a feature directory; tensors are loaded shard by shard, lazily."""
+    """Read access to feature data; tensors are loaded shard file by shard file, lazily.
+
+    ``root`` is one feature directory (with ``manifest.json``) or a directory
+    of them, e.g. the ``shard-*`` directories that several machines wrote with
+    ``extract-features --shard i/n``. All of them are read as one dataset.
+    """
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
-        self.manifest = json.loads((self.root / MANIFEST).read_text())
-        if self.manifest.get("format") != FORMAT or self.manifest.get("version") != VERSION:
-            raise ValueError(f"{root}: not a version-{VERSION} feature directory")
-        self.hidden_size: int = self.manifest["hidden_size"]
-        self._cache: dict[int, dict[str, torch.Tensor]] = {}
+        dirs = (
+            [self.root]
+            if (self.root / MANIFEST).exists()
+            else sorted(p.parent for p in self.root.glob(f"*/{MANIFEST}"))
+        )
+        if not dirs:
+            raise ValueError(f"{root}: no {MANIFEST} here or in its subdirectories")
+        self.files: list[Path] = []
         self.sequences: list[SequenceRef] = []
+        hidden = set()
         from safetensors import safe_open
 
-        for i, s in enumerate(self.manifest["shards"]):
-            with safe_open(str(self.root / s["file"]), framework="pt") as f:
-                starts = f.get_tensor("seq_starts").tolist()
-            self.sequences += [SequenceRef(i, a, b) for a, b in zip(starts, starts[1:], strict=False)]
+        for d in dirs:
+            manifest = json.loads((d / MANIFEST).read_text())
+            if manifest.get("format") != FORMAT or manifest.get("version") != VERSION:
+                raise ValueError(f"{d}: not a version-{VERSION} feature directory")
+            hidden.add(manifest["hidden_size"])
+            for s in manifest["shards"]:
+                idx = len(self.files)
+                self.files.append(d / s["file"])
+                with safe_open(str(self.files[-1]), framework="pt") as f:
+                    starts = f.get_tensor("seq_starts").tolist()
+                self.sequences += [SequenceRef(idx, a, b) for a, b in zip(starts, starts[1:], strict=False)]
+        if len(hidden) != 1:
+            raise ValueError(f"{root}: feature directories disagree on hidden size ({sorted(hidden)})")
+        self.hidden_size: int = hidden.pop()
+        self._cache: dict[int, dict[str, torch.Tensor]] = {}
 
     def _shard(self, i: int) -> dict[str, torch.Tensor]:
         if i not in self._cache:
@@ -125,7 +145,7 @@ class FeatureSet:
 
             if len(self._cache) >= 2:  # keep memory bounded
                 self._cache.pop(next(iter(self._cache)))
-            self._cache[i] = load_file(str(self.root / self.manifest["shards"][i]["file"]))
+            self._cache[i] = load_file(str(self.files[i]))
         return self._cache[i]
 
     def get(self, ref: SequenceRef, a: int = 0, b: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:

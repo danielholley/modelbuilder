@@ -40,6 +40,12 @@ fn seed(name: &str) -> u64 {
 fn data(name: &str, dtype: DType, shape: &[u64]) -> Vec<u8> {
     let n: u64 = shape.iter().product();
     let mut rng = Rng(seed(name));
+    // llama.cpp stores DeltaNet's decay as `-exp(A_log)`, which is always negative.
+    if name.ends_with(".ssm_a") && dtype == DType::F32 {
+        return (0..n)
+            .flat_map(|_| (-(rng.next_f32().exp())).to_le_bytes())
+            .collect();
+    }
     match dtype {
         DType::F32 => (0..n).flat_map(|_| rng.next_f32().to_le_bytes()).collect(),
         DType::Bf16 => (0..n)

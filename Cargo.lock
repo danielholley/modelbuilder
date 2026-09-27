@@ -753,6 +753,7 @@ dependencies = [
  "mb-formats",
  "mb-ir",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "ts-rs",

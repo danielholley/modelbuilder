@@ -67,6 +67,15 @@ const PROFILES: &[HardwareProfile] = &[
         peak_tflops: 989.0,
     },
     HardwareProfile {
+        id: "4xP40",
+        description: "4 × Tesla P40 24 GB (Pascal: fp32 only, no bf16; peak is fp32)",
+        backend: Backend::Cuda,
+        gpus: 4,
+        mem_per_gpu_gib: 24.0,
+        usable_fraction: 0.9,
+        peak_tflops: 11.8,
+    },
+    HardwareProfile {
         id: "m3-max-128gb",
         description: "Apple M3 Max, 128 GB unified memory (40-core GPU)",
         backend: Backend::Metal,
