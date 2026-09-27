@@ -156,7 +156,8 @@ MTP and drafter options (from the MTP section above):
 
 ### Constraints that apply to every Bonsai plugin
 
-- **Hadamard basis.** Any new or modified weight that reads the residual
+- **Hadamard basis** (full contract and loader rules in
+  [`prismml-quant-formats.md`](prismml-quant-formats.md)). Any new or modified weight that reads the residual
   stream (width 5120) or the 6144- or 17408-wide activations must be stored
   rotated with the same signs, and `prism.hadamard.weight_names` must be
   updated. The rotation is orthogonal on the input dimension, so
@@ -175,8 +176,10 @@ MTP and drafter options (from the MTP section above):
   symbolic.
 - The per-entry size of V4.1's main KV (head dim 512 is stated; how the 890
   B/token breaks down is not).
-- The exact bit layout inside PQ2_0 and PTQ1_0 blocks. Only the block sizes
-  are confirmed. Dequantizing them needs the PrismML fork's source.
+- ~~The bit layout inside PQ2_0/PTQ1_0 blocks~~: **resolved**. See
+  [`prismml-quant-formats.md`](prismml-quant-formats.md). It was read from the
+  fork's source and verified on the real weights: decoded and un-rotated, they
+  reach cosine 0.88 against Qwen3.8-27B.
 - Whether the fork's MTP support (#205) expects a specific tensor layout.
 
 ## Sources

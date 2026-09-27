@@ -12,12 +12,14 @@ mod dtype;
 mod ir;
 mod naming;
 mod raw;
+mod rotation;
 
 pub use config::{ConfigView, Key};
 pub use dtype::{DType, GgmlType};
 pub use ir::{
     AttentionKind, AttentionSpec, FfnSpec, Layer, LinearAttentionSpec, Mixer, MlaSpec, ModelIr,
-    MoeSpec, MtpInfo, RopeInfo, WeightRotation,
+    MoeSpec, MtpInfo, RopeInfo,
 };
 pub use naming::{classify, Component, TensorKind, TensorRole};
 pub use raw::{AuxFiles, MetaType, MetaValue, Metadata, RawModel, SourceFormat, TensorInfo};
+pub use rotation::{fwht_normalized, RotationError, SignMode, WeightRotation};

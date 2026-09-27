@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::{
     classify, Component, ConfigView, Key, RawModel, SourceFormat, TensorInfo, TensorKind,
-    TensorRole,
+    TensorRole, WeightRotation,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,40 +92,6 @@ pub struct Layer {
 pub struct RopeInfo {
     pub theta: Option<f64>,
     pub scaling: Option<Value>,
-}
-
-/// An orthogonal rotation folded into the stored weights (e.g. PrismML's
-/// blockwise Hadamard). The runtime must apply the matching transform to
-/// activations, so surgery has to keep new and modified tensors in the same basis.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct WeightRotation {
-    pub scheme: String,
-    pub block_size: Option<u64>,
-    /// Weight matrices stored in the rotated basis.
-    pub rotated_tensors: usize,
-    /// Tensors stored with the inverse rotation (e.g. input embeddings).
-    pub inverse_tensors: usize,
-    /// Metadata key prefix that declares the rotation.
-    pub metadata_prefix: String,
-}
-
-impl WeightRotation {
-    fn detect(cfg: &ConfigView) -> Option<Self> {
-        const PREFIX: &str = "prism.hadamard.";
-        let key = |k: &str| cfg.gguf_raw(&format!("{PREFIX}{k}"));
-        let count = |k: &str| key(k).and_then(|v| v.as_array()).map_or(0, <[_]>::len);
-        key("version")?;
-        Some(Self {
-            scheme: key("transform")
-                .and_then(|v| v.as_str())
-                .unwrap_or("hadamard")
-                .to_string(),
-            block_size: key("block_size").and_then(|v| v.as_u64()),
-            rotated_tensors: count("weight_names"),
-            inverse_tensors: count("inverse_weight_names"),
-            metadata_prefix: PREFIX.trim_end_matches('.').to_string(),
-        })
-    }
 }
 
 /// True unless the RoPE config is just the default (no actual scaling).

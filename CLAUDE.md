@@ -29,6 +29,12 @@ is in `docs/research/targets.md`. Read it before working on attention, KV, or
 MTP plugins. It was checked against the paper, model cards, and real file
 headers, and it lists what is still unconfirmed.
 
+PrismML's block formats and Hadamard contract are in
+`docs/research/prismml-quant-formats.md`, read from the source of the
+[PrismML-Eng/llama.cpp](https://github.com/PrismML-Eng/llama.cpp) fork. Clone the
+fork outside the repo when you need it, and regenerate the decoder golden
+vectors with `scripts/prism-golden.sh <fork checkout>`.
+
 The target checkpoint is `prism-ml/Ternary-Bonsai-2-27B-gguf`, not
 `prism-ml/Bonsai-27B-gguf` (that one is the 1-bit model).
 
@@ -92,7 +98,7 @@ Planned crates:
 | Crate | Responsibility |
 |---|---|
 | `mb-ir` ✅ | Normalized Model IR: layers, attention/MLP/MoE blocks, tensors, dtypes and quant formats. All other crates speak this. No IO. |
-| `mb-formats` ✅ | Readers and writers for **HF safetensors + config.json** and **GGUF**. Uses mmap and streaming, and never materializes a full model. |
+| `mb-formats` ✅ | Readers and writers for **HF safetensors + config.json** and **GGUF**. Uses mmap and streaming, and never materializes a full model. `dequant` decodes F32/F16/BF16/Q8_0/PQ2_0/PTQ1_0 to f32 one tensor at a time. |
 | `mb-analyze` ✅ (static, quant, KV, provenance) | Static, metadata, and weight-statistics analyzers. Weight statistics are not built yet. |
 | `mb-fixtures` ✅ | Tiny synthetic checkpoints for tests (Llama GQA, Qwen3.8-like hybrid, DeepSeek MLA+MoE, mixed-quant GGUF). |
 | `mb-features` | Feature plugin trait plus the built-in features. |
@@ -218,9 +224,10 @@ formats = ["safetensors", "gguf"]
 - **Rotated weight bases are first-class.** Some checkpoints (PrismML Bonsai 2)
   store weights with an orthogonal Hadamard rotation folded in, declared in
   metadata (`ModelIr::weight_rotation`, `prism.hadamard.*`). Surgery must keep
-  new or modified tensors in the same basis and keep that metadata in sync.
-  Per-input-channel statistics must undo the rotation first; singular-value
-  spectra don't change under it.
+  new or modified tensors in the same basis and keep that metadata in sync
+  (contract and loader rules: `docs/research/prismml-quant-formats.md`).
+  Per-input-channel statistics must undo the rotation first with
+  `WeightRotation::to_primal`; singular-value spectra don't change under it.
 - **Leave the source untouched:** surgery writes a new checkpoint and never
   modifies the input model in place.
 
@@ -239,8 +246,5 @@ formats = ["safetensors", "gguf"]
 
 ## Open questions
 
-- The bit layout inside PQ2_0 and PTQ1_0 blocks (needed to dequantize them
-  for weight statistics) comes from the PrismML llama.cpp fork's source, which
-  hasn't been read yet. See the "Still unconfirmed" list in
-  `docs/research/targets.md`.
+- See the "Still unconfirmed" list in `docs/research/targets.md`.
 - Dataset sourcing and caching strategy for distillation and retraining.
