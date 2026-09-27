@@ -48,6 +48,27 @@ fn data(name: &str, dtype: DType, shape: &[u64]) -> Vec<u8> {
         DType::F16 => (0..n)
             .flat_map(|_| f32_to_f16(rng.next_f32()).to_le_bytes())
             .collect(),
+        // Valid blocks with a sane fp16 scale, so decoders and statistics see
+        // realistic values. PQ2_0 uses only the ternary codes 0..=2.
+        DType::Ggml(GgmlType(8)) => (0..n / 32)
+            .flat_map(|_| {
+                let mut b = f32_to_f16(0.01).to_le_bytes().to_vec();
+                b.extend((0..32).map(|_| (rng.next_f32() * 6000.0) as i8 as u8));
+                b
+            })
+            .collect(),
+        DType::Ggml(GgmlType(142)) => (0..n / 128)
+            .flat_map(|_| {
+                let mut b = f32_to_f16(0.02).to_le_bytes().to_vec();
+                b.extend((0..32).map(|_| {
+                    (0..4).fold(0u8, |acc, k| {
+                        let code = ((rng.next_f32() + 0.02) * 75.0).clamp(0.0, 2.99) as u8;
+                        acc | (code << (2 * k))
+                    })
+                }));
+                b
+            })
+            .collect(),
         other => {
             let bytes = other
                 .storage_bytes(n)

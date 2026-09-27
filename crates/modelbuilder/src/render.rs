@@ -2,6 +2,7 @@
 
 use std::fmt::Write;
 
+use mb_analyze::weights::{TensorStats, WeightStatsReport};
 use mb_analyze::Report;
 use mb_ir::ModelIr;
 
@@ -205,6 +206,126 @@ pub fn tensors(ir: &ModelIr) -> String {
             r.component,
             r.kind
         );
+    }
+    s
+}
+
+fn median(mut v: Vec<f64>) -> f64 {
+    if v.is_empty() {
+        return f64::NAN;
+    }
+    v.sort_by(f64::total_cmp);
+    v[v.len() / 2]
+}
+
+pub fn weight_stats(r: &WeightStatsReport, ir: &ModelIr, top: usize) -> String {
+    let mut s = String::new();
+    let _ = writeln!(s, "{}", ir.raw.root.display());
+    let _ = writeln!(
+        s,
+        "  {} tensors analyzed, {} skipped\n",
+        r.tensors.len(),
+        r.skipped.len()
+    );
+
+    // Summary by tensor kind.
+    let mut kinds: Vec<(String, Vec<&TensorStats>)> = Vec::new();
+    for t in &r.tensors {
+        let k = format!("{:?}", t.kind);
+        match kinds.iter_mut().find(|(n, _)| *n == k) {
+            Some((_, v)) => v.push(t),
+            None => kinds.push((k, vec![t])),
+        }
+    }
+    let _ = writeln!(
+        s,
+        "BY KIND         {:>5} {:>10} {:>9} {:>9} {:>9} {:>8}",
+        "count", "median rms", "kurtosis", "outlier", "zeros", "ternary"
+    );
+    for (k, v) in &kinds {
+        let med = |f: &dyn Fn(&TensorStats) -> Option<f64>| {
+            median(v.iter().filter_map(|t| f(t)).collect())
+        };
+        let ternary = med(&|t| t.ternary_group_fraction);
+        let _ = writeln!(
+            s,
+            "  {k:<13} {:>5} {:>10.4} {:>9.2} {:>9} {:>8.1}% {:>8}",
+            v.len(),
+            med(&|t| Some(t.rms)),
+            med(&|t| Some(t.kurtosis)),
+            v.iter()
+                .filter_map(|t| t.channel_outlier_ratio)
+                .fold(None, |m: Option<f64>, x| Some(m.map_or(x, |m| m.max(x))))
+                .map_or("-".into(), |x| format!("{x:.1}x")),
+            100.0 * med(&|t| Some(t.zero_fraction)),
+            if ternary.is_nan() {
+                "-".into()
+            } else {
+                format!("{:.0}%", 100.0 * ternary)
+            },
+        );
+    }
+    let _ = writeln!(
+        s,
+        "  (median per kind; outlier = worst input-channel RMS / median channel RMS; ternary = share of 128-groups)"
+    );
+
+    let mut ranked: Vec<&TensorStats> = r.tensors.iter().filter(|t| t.shape.len() == 2).collect();
+    ranked.sort_by(|a, b| b.kurtosis.total_cmp(&a.kurtosis));
+    let _ = writeln!(s, "\nHEAVIEST TAILS (excess kurtosis)");
+    for t in ranked.iter().take(top) {
+        let _ = writeln!(
+            s,
+            "  {:<52} {:>9.2}  max|w| {:.4}",
+            t.name, t.kurtosis, t.max_abs
+        );
+    }
+    ranked.sort_by(|a, b| {
+        b.channel_outlier_ratio
+            .unwrap_or(0.0)
+            .total_cmp(&a.channel_outlier_ratio.unwrap_or(0.0))
+    });
+    let _ = writeln!(s, "\nOUTLIER INPUT CHANNELS");
+    for t in ranked.iter().take(top) {
+        let _ = writeln!(
+            s,
+            "  {:<52} {:>8.1}x",
+            t.name,
+            t.channel_outlier_ratio.unwrap_or(0.0)
+        );
+    }
+
+    if !r.kv_spectra.is_empty() {
+        let _ = writeln!(
+            s,
+            "\nK/V SPECTRA     rank for 90/95/99% energy (effective rank), of full rank"
+        );
+        for k in &r.kv_spectra {
+            let f = |x: &mb_analyze::weights::SpectrumSummary| {
+                format!(
+                    "{}/{}/{} ({:.0}) of {}",
+                    x.energy_rank_90,
+                    x.energy_rank_95,
+                    x.energy_rank_99,
+                    x.effective_rank,
+                    x.full_rank
+                )
+            };
+            let _ = writeln!(
+                s,
+                "  layer {:<3}  K {:<26} V {:<26} [K;V] {}",
+                k.layer,
+                f(&k.k),
+                f(&k.v),
+                f(&k.kv)
+            );
+        }
+    }
+    for (name, why) in &r.skipped {
+        let _ = writeln!(s, "  skipped {name}: {why}");
+    }
+    for n in &r.notes {
+        let _ = writeln!(s, "  note: {n}");
     }
     s
 }

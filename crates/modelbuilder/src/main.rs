@@ -33,6 +33,25 @@ enum Command {
         #[arg(long)]
         context: Option<u64>,
     },
+    /// Stream the weights and compute statistics: norms, outliers, sparsity,
+    /// ternary structure, and (with --kv-spectra) K/V singular-value spectra.
+    Stats {
+        /// A .gguf file or an HF directory (config.json + .safetensors).
+        path: PathBuf,
+        /// Only tensors whose name contains one of these (comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        only: Vec<String>,
+        /// Compute K/V spectra for each attention layer (the rank evidence for
+        /// KV compression / MLA conversion).
+        #[arg(long)]
+        kv_spectra: bool,
+        /// How many tensors to list in the outlier rankings.
+        #[arg(long, default_value_t = 10)]
+        top: usize,
+        /// Print the full report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Write a tiny synthetic checkpoint, for trying the tool without a real model.
     #[command(hide = true)]
     Fixture { kind: FixtureKind, out: PathBuf },
@@ -74,6 +93,24 @@ fn main() -> Result<()> {
                 if tensors {
                     print!("{}", render::tensors(&ir));
                 }
+            }
+        }
+        Command::Stats {
+            path,
+            only,
+            kv_spectra,
+            top,
+            json,
+        } => {
+            let model =
+                mb_formats::open(&path).with_context(|| format!("opening {}", path.display()))?;
+            let ir = ModelIr::from_raw(model.raw.clone());
+            let opts = mb_analyze::weights::WeightStatsOptions { only, kv_spectra };
+            let report = mb_analyze::weights::weight_stats(&model, &ir, &opts)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", render::weight_stats(&report, &ir, top));
             }
         }
         Command::Fixture { kind, out } => {

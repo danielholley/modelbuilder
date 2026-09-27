@@ -154,9 +154,50 @@ MTP and drafter options (from the MTP section above):
    V4.1 and 1-bit Bonsai 27B did. More work, but the reported payoff is proven
    (1.37× on H100).
 
+### Measured: K/V weight spectra (`modelbuilder stats --kv-spectra`)
+
+These are the singular values of each full-attention layer's K and V
+projections (1024 × 5120 each) and of the stacked `[K; V]` (2048 × 5120). The
+stacked matrix is what a shared, MLA-style KV latent would have to
+reconstruct. Bonsai 2 values come from the decoded PQ2_0 weights; rotation
+doesn't affect singular values. Qwen3.8 values come from the BF16 original.
+Each cell is the rank needed for 90/95/99% of the squared singular values
+("energy"), out of 2048.
+
+| Layer | Bonsai 2 `[K;V]` | Qwen3.8 `[K;V]` | | Layer | Bonsai 2 `[K;V]` | Qwen3.8 `[K;V]` |
+|---|---|---|---|---|---|---|
+| 3 | 1277/1534/1879 | 1196/1459/1835 | | 35 | 1172/1443/1833 | 1021/1286/1734 |
+| 7 | 1291/1548/1887 | 1216/1484/1855 | | 39 | 1175/1447/1835 | 1037/1304/1748 |
+| 11 | 1263/1526/1877 | 1171/1449/1840 | | 43 | 1148/1420/1814 | 990/1256/1703 |
+| 15 | 1234/1505/1871 | 1105/1391/1811 | | 47 | 1110/1385/1796 | 949/1204/1666 |
+| 19 | 1296/1549/1887 | 1218/1480/1853 | | 51 | 1094/1360/1777 | 953/1190/1643 |
+| 23 | 1256/1519/1874 | 1173/1447/1840 | | 55 | 991/1278/1743 | 759/1019/1555 |
+| 27 | 1189/1460/1839 | 1051/1334/1772 | | 59 | 816/1099/1639 | 570/799/1359 |
+| 31 | 1160/1437/1830 | 991/1269/1730 | | 63 | 957/1230/1704 | 839/1083/1553 |
+
+What this shows:
+
+- **In weight space, K and V are high-rank.** Even the most compressible
+  layer (59) needs 816 of 2048 dimensions for 90% of the energy. A
+  weight-only SVD into a 512-dim latent would drop well over 10% of the energy
+  in every layer.
+- **Bonsai 2 is flatter than its base.** At 90% energy it needs 6–43% more
+  rank than Qwen3.8, which fits ternary quantization noise raising the spectral
+  floor. Low-rank init should factorize the **Qwen3.8 original** and then QAT
+  to ternary, rather than factorize Bonsai's ternary weights.
+- **Deeper layers compress better** (layers 51–63). A per-layer latent rank
+  would beat one uniform `kv_lora_rank`.
+- **These are upper bounds.** The rank that matters is how much of `K·x` and
+  `V·x` survives on real activations. Activation-aware SVD (ASVD/Palu-style,
+  weighting by calibration-activation covariance) is usually much lower-rank
+  than the weights themselves. Measuring it needs calibration data, so it
+  belongs to the Python probe side and is the next measurement for the KV
+  plugins.
+
 ### Constraints that apply to every Bonsai plugin
 
-- **Hadamard basis.** Any new or modified weight that reads the residual
+- **Hadamard basis** (full contract and loader rules in
+  [`prismml-quant-formats.md`](prismml-quant-formats.md)). Any new or modified weight that reads the residual
   stream (width 5120) or the 6144- or 17408-wide activations must be stored
   rotated with the same signs, and `prism.hadamard.weight_names` must be
   updated. The rotation is orthogonal on the input dimension, so
@@ -175,8 +216,10 @@ MTP and drafter options (from the MTP section above):
   symbolic.
 - The per-entry size of V4.1's main KV (head dim 512 is stated; how the 890
   B/token breaks down is not).
-- The exact bit layout inside PQ2_0 and PTQ1_0 blocks. Only the block sizes
-  are confirmed. Dequantizing them needs the PrismML fork's source.
+- ~~The bit layout inside PQ2_0/PTQ1_0 blocks~~: **resolved**. See
+  [`prismml-quant-formats.md`](prismml-quant-formats.md). It was read from the
+  fork's source and verified on the real weights: decoded and un-rotated, they
+  reach cosine 0.88 against Qwen3.8-27B.
 - Whether the fork's MTP support (#205) expects a specific tensor layout.
 
 ## Sources

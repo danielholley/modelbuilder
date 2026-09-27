@@ -21,13 +21,19 @@ wrong*. It then carries the change through to an exported model.
 ## Status
 
 The Rust core exists: `mb-ir`, `mb-formats`, `mb-analyze`, `mb-fixtures`, and
-the `modelbuilder` binary with `inspect`. Everything else in the layout below is
+the `modelbuilder` binary with `inspect` and `stats`. Everything else in the layout below is
 the target design, not code yet. Update this file when the real layout differs.
 
 Research on the first target (DeepSeek-V4.1-Flash KV techniques on Bonsai 2 27B)
 is in `docs/research/targets.md`. Read it before working on attention, KV, or
 MTP plugins. It was checked against the paper, model cards, and real file
 headers, and it lists what is still unconfirmed.
+
+PrismML's block formats and Hadamard contract are in
+`docs/research/prismml-quant-formats.md`, read from the source of the
+[PrismML-Eng/llama.cpp](https://github.com/PrismML-Eng/llama.cpp) fork. Clone the
+fork outside the repo when you need it, and regenerate the decoder golden
+vectors with `scripts/prism-golden.sh <fork checkout>`.
 
 The target checkpoint is `prism-ml/Ternary-Bonsai-2-27B-gguf`, not
 `prism-ml/Bonsai-27B-gguf` (that one is the 1-bit model).
@@ -39,6 +45,7 @@ cargo build
 cargo test --workspace
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings
 cargo run -- inspect <model.gguf | hf-dir> [--json] [--tensors] [--context N]
+cargo run --release -- stats <model> [--only substr,...] [--kv-spectra] [--top N] [--json]
 cargo run -- fixture qwen-hybrid /tmp/qh   # hidden: writes a tiny test checkpoint
 ```
 
@@ -92,8 +99,8 @@ Planned crates:
 | Crate | Responsibility |
 |---|---|
 | `mb-ir` ✅ | Normalized Model IR: layers, attention/MLP/MoE blocks, tensors, dtypes and quant formats. All other crates speak this. No IO. |
-| `mb-formats` ✅ | Readers and writers for **HF safetensors + config.json** and **GGUF**. Uses mmap and streaming, and never materializes a full model. |
-| `mb-analyze` ✅ (static, quant, KV, provenance) | Static, metadata, and weight-statistics analyzers. Weight statistics are not built yet. |
+| `mb-formats` ✅ | Readers and writers for **HF safetensors + config.json** and **GGUF**. Uses mmap and streaming, and never materializes a full model. `dequant` decodes F32/F16/BF16/Q8_0/PQ2_0/PTQ1_0 to f32 one tensor at a time. |
+| `mb-analyze` ✅ | Static, metadata/provenance, KV-cache, and weight-statistics analyzers. `weights` streams tensors a chunk of rows at a time: moments, kurtosis and channel outliers in the primal basis; zeros and ternary structure in the stored basis; K/V singular-value spectra (`nalgebra`). Activation-aware statistics need calibration data and belong to the Python side. |
 | `mb-fixtures` ✅ | Tiny synthetic checkpoints for tests (Llama GQA, Qwen3.8-like hybrid, DeepSeek MLA+MoE, mixed-quant GGUF). |
 | `mb-features` | Feature plugin trait plus the built-in features. |
 | `mb-plan` | Recipe parsing, compatibility resolution, stage ordering, and cost models. |
@@ -218,15 +225,17 @@ formats = ["safetensors", "gguf"]
 - **Rotated weight bases are first-class.** Some checkpoints (PrismML Bonsai 2)
   store weights with an orthogonal Hadamard rotation folded in, declared in
   metadata (`ModelIr::weight_rotation`, `prism.hadamard.*`). Surgery must keep
-  new or modified tensors in the same basis and keep that metadata in sync.
-  Per-input-channel statistics must undo the rotation first; singular-value
-  spectra don't change under it.
+  new or modified tensors in the same basis and keep that metadata in sync
+  (contract and loader rules: `docs/research/prismml-quant-formats.md`).
+  Per-input-channel statistics must undo the rotation first with
+  `WeightRotation::to_primal`; singular-value spectra don't change under it.
 - **Leave the source untouched:** surgery writes a new checkpoint and never
   modifies the input model in place.
 
 ## Conventions
 
-- Rust: stable toolchain, `cargo fmt`, `cargo clippy -- -D warnings`,
+- Rust: stable toolchain (MSRV 1.85, checked in CI; check a new dependency's
+  `rust-version` before adding it), `cargo fmt`, `cargo clippy -- -D warnings`,
   `cargo test` before committing. Use `thiserror` in libraries and `anyhow`
   only in binaries.
 - Python: 3.11+, `ruff` for lint and format, `pytest`, type hints throughout.
@@ -239,8 +248,5 @@ formats = ["safetensors", "gguf"]
 
 ## Open questions
 
-- The bit layout inside PQ2_0 and PTQ1_0 blocks (needed to dequantize them
-  for weight statistics) comes from the PrismML llama.cpp fork's source, which
-  hasn't been read yet. See the "Still unconfirmed" list in
-  `docs/research/targets.md`.
+- See the "Still unconfirmed" list in `docs/research/targets.md`.
 - Dataset sourcing and caching strategy for distillation and retraining.
