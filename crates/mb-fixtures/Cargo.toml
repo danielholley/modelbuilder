@@ -1,0 +1,16 @@
+[package]
+name = "mb-fixtures"
+description = "Tiny synthetic checkpoints for modelbuilder tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+mb-formats.workspace = true
+mb-ir.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
