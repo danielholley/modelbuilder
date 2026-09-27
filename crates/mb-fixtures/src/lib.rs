@@ -221,7 +221,7 @@ pub fn llama_gqa(dir: &Path) -> PathBuf {
     out
 }
 
-/// Qwen3.8-like hybrid model, scaled down: 8 layers in the pattern
+/// Qwen3.8-like hybrid model (HF `qwen3_5` layout and tensor names), scaled down: 8 layers in the pattern
 /// 3 × Gated DeltaNet + 1 × gated full attention (GQA), an MTP module, and a
 /// vision tower, nested under `text_config`, written as 2 shards.
 pub fn qwen_hybrid(dir: &Path) -> PathBuf {
@@ -237,11 +237,12 @@ pub fn qwen_hybrid(dir: &Path) -> PathBuf {
         })
         .collect();
     let config = json!({
-        "architectures": ["Qwen3_8ForConditionalGeneration"],
-        "model_type": "qwen3_8",
+        "architectures": ["Qwen3_5ForConditionalGeneration"],
+        "model_type": "qwen3_5",
         "tie_word_embeddings": false,
         "text_config": {
-            "model_type": "qwen3_8_text",
+            "model_type": "qwen3_5_text",
+            "attn_output_gate": true,
             "hidden_size": hidden,
             "intermediate_size": inter,
             "num_hidden_layers": 8,
@@ -282,14 +283,16 @@ pub fn qwen_hybrid(dir: &Path) -> PathBuf {
             .add(format!("{a}.k_norm.weight"), BF16, &[hd]);
         } else {
             let a = format!("{p}.linear_attn");
-            let qkvz = 2 * lk_heads * lk_dim + 2 * lv_heads * lv_dim;
+            // Split projections, as in the released Qwen3.8-27B checkpoint.
             let conv_dim = 2 * lk_heads * lk_dim + lv_heads * lv_dim;
-            b.add(format!("{a}.in_proj_qkvz.weight"), BF16, &[qkvz, hidden])
+            b.add(format!("{a}.in_proj_qkv.weight"), BF16, &[conv_dim, hidden])
                 .add(
-                    format!("{a}.in_proj_ba.weight"),
+                    format!("{a}.in_proj_z.weight"),
                     BF16,
-                    &[2 * lv_heads, hidden],
+                    &[lv_heads * lv_dim, hidden],
                 )
+                .add(format!("{a}.in_proj_a.weight"), BF16, &[lv_heads, hidden])
+                .add(format!("{a}.in_proj_b.weight"), BF16, &[lv_heads, hidden])
                 .add(format!("{a}.conv1d.weight"), BF16, &[conv_dim, 1, conv])
                 .add(format!("{a}.A_log"), F32, &[lv_heads])
                 .add(format!("{a}.dt_bias"), BF16, &[lv_heads])
@@ -508,6 +511,118 @@ pub fn gguf_mixed_quant(dir: &Path) -> PathBuf {
     ];
     std::fs::create_dir_all(dir).unwrap();
     let path = dir.join("tiny-mixed.gguf");
+    gguf::write(&path, &kv_pairs, &b.materialize()).unwrap();
+    path
+}
+
+/// Bonsai-2-like GGUF: llama.cpp `qwen35` layout (3 × gated DeltaNet + 1 ×
+/// gated GQA, repeated), ternary `PQ2_0` weights, bf16/f32 recurrent-state
+/// tensors, and PrismML Hadamard-rotation metadata. No MTP tensors, matching
+/// the released Ternary-Bonsai-2-27B files.
+pub fn gguf_bonsai_like(dir: &Path) -> PathBuf {
+    // PQ2_0 blocks are 128 weights along the input dimension, so every input
+    // width here is a multiple of 128.
+    let (hidden, heads, kv, hd, inter, vocab) = (128u64, 4u64, 2u64, 32u64, 256u64, 256u64);
+    let (k_heads, v_heads, state) = (2u64, 4u64, 32u64);
+    let pq2 = DType::Ggml(GgmlType::from_name("PQ2_0").unwrap());
+    let conv_dim = 2 * k_heads * state + v_heads * state;
+    let mut b = Builder::default();
+    let mut rotated = vec!["output.weight".to_string()];
+    b.add("token_embd.weight", pq2, &[vocab, hidden]);
+    for l in 0..8u64 {
+        let p = format!("blk.{l}");
+        b.add(format!("{p}.attn_norm.weight"), F32, &[hidden]);
+        let mut add_rot = |b: &mut Builder, name: String, shape: &[u64]| {
+            rotated.push(name.clone());
+            b.add(name, pq2, shape);
+        };
+        if l % 4 == 3 {
+            add_rot(
+                &mut b,
+                format!("{p}.attn_q.weight"),
+                &[2 * heads * hd, hidden],
+            );
+            add_rot(&mut b, format!("{p}.attn_k.weight"), &[kv * hd, hidden]);
+            add_rot(&mut b, format!("{p}.attn_v.weight"), &[kv * hd, hidden]);
+            add_rot(
+                &mut b,
+                format!("{p}.attn_output.weight"),
+                &[hidden, heads * hd],
+            );
+            b.add(format!("{p}.attn_q_norm.weight"), F32, &[hd]).add(
+                format!("{p}.attn_k_norm.weight"),
+                F32,
+                &[hd],
+            );
+        } else {
+            add_rot(&mut b, format!("{p}.attn_qkv.weight"), &[conv_dim, hidden]);
+            add_rot(
+                &mut b,
+                format!("{p}.attn_gate.weight"),
+                &[v_heads * state, hidden],
+            );
+            add_rot(
+                &mut b,
+                format!("{p}.ssm_out.weight"),
+                &[hidden, v_heads * state],
+            );
+            b.add(format!("{p}.ssm_a"), F32, &[v_heads])
+                .add(format!("{p}.ssm_alpha.weight"), BF16, &[v_heads, hidden])
+                .add(format!("{p}.ssm_beta.weight"), BF16, &[v_heads, hidden])
+                .add(format!("{p}.ssm_conv1d.weight"), F32, &[conv_dim, 4])
+                .add(format!("{p}.ssm_dt.bias"), F32, &[v_heads])
+                .add(format!("{p}.ssm_norm.weight"), F32, &[state]);
+        }
+        add_rot(&mut b, format!("{p}.ffn_gate.weight"), &[inter, hidden]);
+        add_rot(&mut b, format!("{p}.ffn_up.weight"), &[inter, hidden]);
+        add_rot(&mut b, format!("{p}.ffn_down.weight"), &[hidden, inter]);
+        b.add(format!("{p}.post_attention_norm.weight"), F32, &[hidden]);
+    }
+    b.add("output_norm.weight", F32, &[hidden])
+        .add("output.weight", pq2, &[vocab, hidden]);
+
+    let u32v = |v: u64| MetaValue::U32(v as u32);
+    let s = |v: &str| MetaValue::String(v.into());
+    let strings = |v: Vec<String>| MetaValue::Array {
+        elem: MetaType::String,
+        values: v.into_iter().map(MetaValue::String).collect(),
+    };
+    let kv_pairs = vec![
+        ("general.architecture".to_string(), s("qwen35")),
+        ("general.name".to_string(), s("Tiny Bonsai-like")),
+        ("qwen35.block_count".to_string(), u32v(8)),
+        ("qwen35.context_length".to_string(), u32v(262144)),
+        ("qwen35.embedding_length".to_string(), u32v(hidden)),
+        ("qwen35.feed_forward_length".to_string(), u32v(inter)),
+        ("qwen35.attention.head_count".to_string(), u32v(heads)),
+        ("qwen35.attention.head_count_kv".to_string(), u32v(kv)),
+        ("qwen35.attention.key_length".to_string(), u32v(hd)),
+        ("qwen35.attention.value_length".to_string(), u32v(hd)),
+        (
+            "qwen35.rope.freq_base".to_string(),
+            MetaValue::F32(10_000_000.0),
+        ),
+        ("qwen35.ssm.conv_kernel".to_string(), u32v(4)),
+        ("qwen35.ssm.state_size".to_string(), u32v(state)),
+        ("qwen35.ssm.group_count".to_string(), u32v(k_heads)),
+        ("qwen35.ssm.time_step_rank".to_string(), u32v(v_heads)),
+        ("qwen35.ssm.inner_size".to_string(), u32v(v_heads * state)),
+        ("qwen35.full_attention_interval".to_string(), u32v(4)),
+        ("prism.hadamard.version".to_string(), u32v(1)),
+        ("prism.hadamard.block_size".to_string(), u32v(128)),
+        (
+            "prism.hadamard.transform".to_string(),
+            s("normalized-sylvester-walsh-hadamard"),
+        ),
+        ("prism.hadamard.weight_names".to_string(), strings(rotated)),
+        (
+            "prism.hadamard.inverse_weight_names".to_string(),
+            strings(vec!["token_embd.weight".into()]),
+        ),
+        ("general.file_type".to_string(), u32v(141)),
+    ];
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join("tiny-bonsai-like.gguf");
     gguf::write(&path, &kv_pairs, &b.materialize()).unwrap();
     path
 }

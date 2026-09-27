@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use mb_ir::{Component, ConfigView, DType, ModelIr};
+use mb_ir::{Component, ConfigView, DType, ModelIr, WeightRotation};
 use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize)]
@@ -25,6 +25,8 @@ pub struct QuantSummary {
     pub trunk_bits_per_param: f64,
     /// What the checkpoint declares (HF `quantization_config`, GGUF `general.file_type`).
     pub declared: Option<serde_json::Value>,
+    /// Rotation folded into the stored weights, if the checkpoint declares one.
+    pub rotation: Option<WeightRotation>,
     pub notes: Vec<String>,
 }
 
@@ -80,6 +82,26 @@ impl QuantSummary {
                 "{u} is not an upstream ggml type (vendor-specific?). Its size was inferred from tensor offsets and may include padding."
             ));
         }
+        let vendor: Vec<&str> = by_dtype
+            .iter()
+            .map(|s| s.dtype.as_str())
+            .filter(|d| ["PQ2_0", "PTQ1_0"].contains(d))
+            .collect();
+        if !vendor.is_empty() {
+            notes.push(format!(
+                "{} are PrismML vendor types: they need the PrismML-Eng/llama.cpp fork and are rejected by stock llama.cpp.",
+                vendor.join(", ")
+            ));
+        }
+        if let Some(r) = &ir.weight_rotation {
+            notes.push(format!(
+                "Weights are stored in a rotated basis ({}, block {}, {} tensors). Weight statistics must undo it, and surgery must keep new or modified tensors in the same basis and update the `{}.*` metadata.",
+                r.scheme,
+                r.block_size.map_or("?".into(), |b| b.to_string()),
+                r.rotated_tensors,
+                r.metadata_prefix
+            ));
+        }
         let cfg = ConfigView::new(&ir.raw.metadata);
         let declared = cfg.quantization_config().cloned().or_else(|| {
             cfg.gguf_raw("general.file_type")
@@ -99,6 +121,7 @@ impl QuantSummary {
             bits_per_param: bits(total_bytes, total_params),
             trunk_bits_per_param: bits(trunk_bytes, trunk_params),
             declared,
+            rotation: ir.weight_rotation.clone(),
             notes,
         }
     }

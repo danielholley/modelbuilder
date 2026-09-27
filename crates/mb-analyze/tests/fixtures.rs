@@ -52,7 +52,7 @@ fn qwen_hybrid() {
     let ir = load(&mb_fixtures::qwen_hybrid(dir.path()));
     assert!(ir.warnings.is_empty(), "{:?}", ir.warnings);
     assert_eq!(ir.raw.files.len(), 2);
-    assert_eq!(ir.family.as_deref(), Some("qwen3_8_text"));
+    assert_eq!(ir.family.as_deref(), Some("qwen3_5_text"));
 
     let r = analyze(&ir, None);
     assert_eq!(
@@ -130,6 +130,50 @@ fn gguf_mixed_quant() {
     assert_eq!(r.quantization.notes.len(), 1);
     assert_eq!(r.provenance.name.as_deref(), Some("Tiny Mixed Quant"));
     assert!(r.provenance.has_chat_template);
+}
+
+/// The ternary GGUF path, shaped like the released Ternary-Bonsai-2-27B files.
+#[test]
+fn gguf_bonsai_like() {
+    let dir = tempfile::tempdir().unwrap();
+    let ir = load(&mb_fixtures::gguf_bonsai_like(dir.path()));
+    assert!(ir.warnings.is_empty(), "{:?}", ir.warnings);
+    let r = analyze(&ir, None);
+    assert_eq!(
+        r.architecture.layer_pattern.to_string(),
+        "2 × [3 × gated_deltanet+dense, 1 × gqa(4q/2kv,d32,gated)+dense]"
+    );
+    assert_eq!(r.architecture.tie_word_embeddings, Some(false));
+    assert_eq!(r.architecture.mtp_modules, 0);
+
+    // `attn_qkv`/`attn_gate` in DeltaNet layers count as linear attention, not attention.
+    let full_attn_per_layer = (2 * 4 * 32 + 2 * 2 * 32 + 128) * 128 + 2 * 32;
+    assert_eq!(r.params.attention, 2 * full_attn_per_layer);
+    let linear_roles = ir
+        .tensors()
+        .filter(|(t, r)| t.name.starts_with("blk.0.") && r.kind == mb_ir::TensorKind::LinearAttn)
+        .count();
+    assert_eq!(linear_roles, 9);
+
+    // Known vendor layout: exact sizes, 2.125 bits per weight.
+    let pq2 = r
+        .quantization
+        .by_dtype
+        .iter()
+        .find(|s| s.dtype == "PQ2_0")
+        .unwrap();
+    assert!(pq2.bytes_exact);
+    assert_eq!(pq2.bits_per_param, 2.125);
+    let rot = r.quantization.rotation.as_ref().unwrap();
+    assert_eq!((rot.block_size, rot.inverse_tensors), (Some(128), 1));
+    assert_eq!(rot.rotated_tensors, 1 + 2 * 7 + 6 * 6);
+    assert_eq!(r.quantization.notes.len(), 2);
+
+    // 2 full layers × 2 × 2 kv heads × 32 dims × 2 bytes
+    assert_eq!(bf16_bytes_per_token(&r), 512.0);
+    // 6 layers × (fp32 [4 v heads, 32, 32] + bf16 conv (4-1) × 256)
+    let expected_state = 6 * (4 * 32 * 32 * 4 + 3 * 256 * 2);
+    assert_eq!(r.kv_cache.linear_state_bytes, Some(expected_state));
 }
 
 /// The real Qwen3.8-27B layout (the base of Bonsai 2 27B), from config alone,

@@ -37,17 +37,7 @@ impl ParamBreakdown {
                 Component::Multimodal => &mut p.multimodal,
                 Component::Other => &mut p.other,
                 Component::Layer => match r.kind {
-                    TensorKind::AttnQ
-                    | TensorKind::AttnK
-                    | TensorKind::AttnV
-                    | TensorKind::AttnQkv
-                    | TensorKind::AttnO
-                    | TensorKind::AttnGate
-                    | TensorKind::QkNorm
-                    | TensorKind::MlaQA
-                    | TensorKind::MlaQB
-                    | TensorKind::MlaKvA
-                    | TensorKind::MlaKvB => &mut p.attention,
+                    k if k.is_attention() => &mut p.attention,
                     TensorKind::LinearAttn => &mut p.linear_attention,
                     TensorKind::FfnGate
                     | TensorKind::FfnUp

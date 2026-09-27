@@ -17,7 +17,7 @@ pub use config::{ConfigView, Key};
 pub use dtype::{DType, GgmlType};
 pub use ir::{
     AttentionKind, AttentionSpec, FfnSpec, Layer, LinearAttentionSpec, Mixer, MlaSpec, ModelIr,
-    MoeSpec, MtpInfo, RopeInfo,
+    MoeSpec, MtpInfo, RopeInfo, WeightRotation,
 };
 pub use naming::{classify, Component, TensorKind, TensorRole};
 pub use raw::{AuxFiles, MetaType, MetaValue, Metadata, RawModel, SourceFormat, TensorInfo};

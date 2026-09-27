@@ -25,9 +25,12 @@ the `modelbuilder` binary with `inspect`. Everything else in the layout below is
 the target design, not code yet. Update this file when the real layout differs.
 
 Research on the first target (DeepSeek-V4.1-Flash KV techniques on Bonsai 2 27B)
-is in `docs/research/targets.md`. Read it before working on attention or KV
-plugins. Its figures come from secondary sources and are marked for
-confirmation.
+is in `docs/research/targets.md`. Read it before working on attention, KV, or
+MTP plugins. It was checked against the paper, model cards, and real file
+headers, and it lists what is still unconfirmed.
+
+The target checkpoint is `prism-ml/Ternary-Bonsai-2-27B-gguf`, not
+`prism-ml/Bonsai-27B-gguf` (that one is the 1-bit model).
 
 ## Commands
 
@@ -38,6 +41,11 @@ cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings
 cargo run -- inspect <model.gguf | hf-dir> [--json] [--tensors] [--context N]
 cargo run -- fixture qwen-hybrid /tmp/qh   # hidden: writes a tiny test checkpoint
 ```
+
+To inspect a real multi-GB model without downloading it, fetch only the
+headers with HTTP range requests into sparse files of the true size. The
+readers only touch header bytes. This is how the numbers in
+`docs/research/targets.md` were measured.
 
 ## Core pipeline
 
@@ -111,9 +119,10 @@ hand-written twice.
   `ModelIr::warnings`, never panics.
 - **Shapes are row-major** (`[out, in]` for linear weights) for every format.
   The GGUF reader reverses ggml's `ne` order, and the writer reverses it back.
-- **Unknown GGUF tensor types are preserved**, not rejected. Vendor types like
-  PrismML's PQ2_0 are sized from the gap to the next tensor offset, with
-  `bytes_exact = false`.
+- **Unknown GGUF tensor types are preserved**, not rejected, and sized from
+  the gap to the next tensor offset with `bytes_exact = false`. Vendor types
+  with a confirmed block layout (PrismML PQ2_0 = 142, PTQ1_0 = 143) are in the
+  `GGML_TYPES` table in `mb-ir/src/dtype.rs`.
 - **GGUF metadata keeps exact integer widths** (`MetaValue::U32` vs `U64`),
   because llama.cpp type-checks keys. A GGUF read→write round trip is
   byte-identical (tested).
@@ -206,6 +215,12 @@ formats = ["safetensors", "gguf"]
   to LoRA or partial-layer training when full training doesn't fit.
 - **Be honest about estimates:** every estimate carries its assumptions and a
   confidence level. Don't present guesses as measurements.
+- **Rotated weight bases are first-class.** Some checkpoints (PrismML Bonsai 2)
+  store weights with an orthogonal Hadamard rotation folded in, declared in
+  metadata (`ModelIr::weight_rotation`, `prism.hadamard.*`). Surgery must keep
+  new or modified tensors in the same basis and keep that metadata in sync.
+  Per-input-channel statistics must undo the rotation first; singular-value
+  spectra don't change under it.
 - **Leave the source untouched:** surgery writes a new checkpoint and never
   modifies the input model in place.
 
@@ -224,8 +239,8 @@ formats = ["safetensors", "gguf"]
 
 ## Open questions
 
-- Exact specs of the target techniques and models (CSA2 layer-mode
-  assignment, Top-K and indexer dims; Bonsai 2's PQ2_0 byte layout and real
-  bits/weight) still need confirming from primary sources. The dev
-  environment could not reach arxiv.org or huggingface.co.
+- The bit layout inside PQ2_0 and PTQ1_0 blocks (needed to dequantize them
+  for weight statistics) comes from the PrismML llama.cpp fork's source, which
+  hasn't been read yet. See the "Still unconfirmed" list in
+  `docs/research/targets.md`.
 - Dataset sourcing and caching strategy for distillation and retraining.

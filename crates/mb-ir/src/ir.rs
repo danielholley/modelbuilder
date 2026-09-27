@@ -94,6 +94,49 @@ pub struct RopeInfo {
     pub scaling: Option<Value>,
 }
 
+/// An orthogonal rotation folded into the stored weights (e.g. PrismML's
+/// blockwise Hadamard). The runtime must apply the matching transform to
+/// activations, so surgery has to keep new and modified tensors in the same basis.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WeightRotation {
+    pub scheme: String,
+    pub block_size: Option<u64>,
+    /// Weight matrices stored in the rotated basis.
+    pub rotated_tensors: usize,
+    /// Tensors stored with the inverse rotation (e.g. input embeddings).
+    pub inverse_tensors: usize,
+    /// Metadata key prefix that declares the rotation.
+    pub metadata_prefix: String,
+}
+
+impl WeightRotation {
+    fn detect(cfg: &ConfigView) -> Option<Self> {
+        const PREFIX: &str = "prism.hadamard.";
+        let key = |k: &str| cfg.gguf_raw(&format!("{PREFIX}{k}"));
+        let count = |k: &str| key(k).and_then(|v| v.as_array()).map_or(0, <[_]>::len);
+        key("version")?;
+        Some(Self {
+            scheme: key("transform")
+                .and_then(|v| v.as_str())
+                .unwrap_or("hadamard")
+                .to_string(),
+            block_size: key("block_size").and_then(|v| v.as_u64()),
+            rotated_tensors: count("weight_names"),
+            inverse_tensors: count("inverse_weight_names"),
+            metadata_prefix: PREFIX.trim_end_matches('.').to_string(),
+        })
+    }
+}
+
+/// True unless the RoPE config is just the default (no actual scaling).
+fn is_real_rope_scaling(v: &Value) -> bool {
+    let kind = v
+        .get("rope_type")
+        .or_else(|| v.get("type"))
+        .and_then(Value::as_str);
+    kind.is_some_and(|k| k != "default") || v.get("factor").is_some()
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MtpInfo {
     pub num_modules: u64,
@@ -114,6 +157,7 @@ pub struct ModelIr {
     pub layers: Vec<Layer>,
     pub mtp: Option<MtpInfo>,
     pub has_multimodal: bool,
+    pub weight_rotation: Option<WeightRotation>,
     /// HF `quantization_config`, if the checkpoint declares one.
     pub quantization_config: Option<Value>,
     /// Classification of each tensor, parallel to `raw.tensors`.
@@ -137,7 +181,7 @@ impl ModelIr {
                     _ => n,
                 });
 
-        let roles: Vec<TensorRole> = raw
+        let mut roles: Vec<TensorRole> = raw
             .tensors
             .iter()
             .map(|t| classify(&t.name, trunk_layers_cfg))
@@ -166,7 +210,7 @@ impl ModelIr {
         let hidden_size = cfg.u64(Key::HiddenSize);
         let layer_types = cfg.layer_types();
         let empty = Vec::new();
-        let layers = (0..num_layers)
+        let layers: Vec<Layer> = (0..num_layers)
             .map(|l| {
                 let idx = by_layer.get(&l).unwrap_or(&empty);
                 let tensors: Vec<(&TensorInfo, &TensorRole)> =
@@ -190,6 +234,18 @@ impl ModelIr {
                 }
             })
             .collect();
+
+        // Linear-attention layers reuse attention-like names in GGUF (`attn_qkv`,
+        // `attn_gate`); they belong to the linear mixer, not to softmax attention.
+        for layer in &layers {
+            if matches!(layer.mixer, Mixer::LinearAttention(_)) {
+                for &i in by_layer.get(&layer.index).unwrap_or(&empty) {
+                    if roles[i].kind.is_attention() {
+                        roles[i].kind = TensorKind::LinearAttn;
+                    }
+                }
+            }
+        }
 
         let mtp_tensors: Vec<usize> = (0..roles.len())
             .filter(|&i| roles[i].component == Component::Mtp)
@@ -224,13 +280,12 @@ impl ModelIr {
             hidden_size,
             vocab_size: cfg.u64(Key::VocabSize).or(embed_rows),
             max_positions: cfg.u64(Key::MaxPositions),
-            tie_word_embeddings: cfg
-                .bool(Key::TieWordEmbeddings)
-                .or((!has_lm_head).then_some(true)),
+            tie_word_embeddings: cfg.bool(Key::TieWordEmbeddings).or(Some(!has_lm_head)),
             rope: RopeInfo {
                 theta: cfg.f64(Key::RopeTheta),
-                scaling: cfg.rope_scaling(),
+                scaling: cfg.rope_scaling().filter(is_real_rope_scaling),
             },
+            weight_rotation: WeightRotation::detect(&cfg),
             layers,
             mtp,
             has_multimodal: roles.iter().any(|r| r.component == Component::Multimodal),
@@ -364,10 +419,22 @@ fn linear_spec(
 ) -> LinearAttentionSpec {
     let names = |pat: &str| tensors.iter().any(|(t, _)| t.name.contains(pat));
     let fam = family.unwrap_or_default();
-    let variant = if names("in_proj_qkvz")
-        || names("in_proj_ba")
-        || fam.contains("qwen3_next")
-        || fam.contains("qwen3next")
+    // Qwen3-Next fuses projections (`in_proj_qkvz`); Qwen3.5+ splits them
+    // (`in_proj_qkv`, `in_proj_z`, `in_proj_a`, `in_proj_b`); llama.cpp names
+    // them `ssm_alpha`/`ssm_beta`.
+    let deltanet_family = ["qwen3_next", "qwen3next", "qwen3_5", "qwen35"]
+        .iter()
+        .any(|f| fam.contains(f));
+    let variant = if deltanet_family
+        || [
+            "in_proj_qkvz",
+            "in_proj_ba",
+            "in_proj_z",
+            "ssm_alpha",
+            "ssm_beta",
+        ]
+        .iter()
+        .any(|n| names(n))
         || (names("linear_attn") && cfg.u64(Key::LinearNumValueHeads).is_some())
     {
         "gated_deltanet"
@@ -383,9 +450,11 @@ fn linear_spec(
         num_key_heads: cfg.u64(Key::LinearNumKeyHeads),
         num_value_heads: cfg.u64(Key::LinearNumValueHeads),
         key_head_dim: cfg.u64(Key::LinearKeyHeadDim),
-        value_head_dim: cfg
-            .u64(Key::LinearValueHeadDim)
-            .or(cfg.u64(Key::LinearKeyHeadDim)),
+        // GGUF has no value-dim key; derive it from `ssm.inner_size / v_heads`.
+        value_head_dim: cfg.u64(Key::LinearValueHeadDim).or_else(|| {
+            let inner = cfg.gguf_arch_value("ssm.inner_size")?.as_u64()?;
+            Some(inner / cfg.u64(Key::LinearNumValueHeads).filter(|&v| v > 0)?)
+        }),
         conv_kernel: cfg.u64(Key::LinearConvKernel),
     }
 }

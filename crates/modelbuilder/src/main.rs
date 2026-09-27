@@ -44,6 +44,7 @@ enum FixtureKind {
     QwenHybrid,
     DeepseekMlaMoe,
     GgufMixedQuant,
+    GgufBonsaiLike,
 }
 
 fn main() -> Result<()> {
@@ -81,6 +82,7 @@ fn main() -> Result<()> {
                 FixtureKind::QwenHybrid => mb_fixtures::qwen_hybrid(&out),
                 FixtureKind::DeepseekMlaMoe => mb_fixtures::deepseek_mla_moe(&out),
                 FixtureKind::GgufMixedQuant => mb_fixtures::gguf_mixed_quant(&out),
+                FixtureKind::GgufBonsaiLike => mb_fixtures::gguf_bonsai_like(&out),
             };
             println!("{}", path.display());
         }

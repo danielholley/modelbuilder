@@ -51,6 +51,27 @@ pub enum TensorKind {
     Other,
 }
 
+impl TensorKind {
+    /// Softmax-attention projections and norms (including MLA's).
+    pub fn is_attention(self) -> bool {
+        use TensorKind::*;
+        matches!(
+            self,
+            AttnQ
+                | AttnK
+                | AttnV
+                | AttnQkv
+                | AttnO
+                | AttnGate
+                | QkNorm
+                | MlaQA
+                | MlaQB
+                | MlaKvA
+                | MlaKvB
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TensorRole {
     pub component: Component,
