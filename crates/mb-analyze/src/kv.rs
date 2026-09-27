@@ -3,6 +3,7 @@ use serde::Serialize;
 
 /// KV cache storage precisions to report. Bits per element include scales.
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct KvPrecision {
     pub name: &'static str,
     pub bits_per_element: f64,
@@ -21,6 +22,7 @@ const PRECISIONS: &[(&str, f64)] = &[
 
 /// Estimated per-sequence inference memory for attention state.
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct KvCacheEstimate {
     /// Attention layers whose cache grows with the sequence.
     pub global_layers: usize,

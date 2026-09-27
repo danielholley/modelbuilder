@@ -9,6 +9,7 @@ use serde::Serialize;
 use crate::hardware::{Backend, HardwareProfile};
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Range {
     pub low: f64,
     pub high: f64,
@@ -37,6 +38,7 @@ impl std::ops::Add for Range {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum Confidence {
     Low,
@@ -45,6 +47,7 @@ pub enum Confidence {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum RiskLevel {
     Low,
@@ -53,6 +56,7 @@ pub enum RiskLevel {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct QualityRisk {
     pub level: RiskLevel,
     pub expected: String,
@@ -61,6 +65,7 @@ pub struct QualityRisk {
 
 /// A measurable runtime effect of the feature, e.g. KV bytes per token.
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Effect {
     pub metric: String,
     pub before: f64,
@@ -70,6 +75,7 @@ pub struct Effect {
 
 /// One training stage, described in terms the cost model can price.
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Stage {
     pub name: String,
     pub what: String,
@@ -89,6 +95,7 @@ pub struct Stage {
 
 /// Model-level inputs to the cost model.
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CostInputs {
     /// Parameters in the forward pass (trunk, embeddings, head).
     pub forward_params: u64,
@@ -100,6 +107,7 @@ pub struct CostInputs {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ComputeEstimate {
     pub profile: &'static str,
     pub train_flops: Range,
@@ -114,6 +122,7 @@ pub struct ComputeEstimate {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum Fit {
     /// No training needed.

@@ -4,6 +4,7 @@ use mb_ir::{Component, ConfigView, DType, ModelIr, WeightRotation};
 use serde::Serialize;
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DTypeStat {
     pub dtype: String,
     pub tensors: usize,
@@ -16,6 +17,7 @@ pub struct DTypeStat {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct QuantSummary {
     pub by_dtype: Vec<DTypeStat>,
     pub total_bytes: u64,

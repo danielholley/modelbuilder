@@ -30,6 +30,7 @@ pub enum SurgeryError {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct WrittenTensor {
     pub name: String,
     pub dtype: String,
@@ -41,6 +42,7 @@ pub struct WrittenTensor {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SurgeryReport {
     pub output: PathBuf,
     pub bytes: u64,

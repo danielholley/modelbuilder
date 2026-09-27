@@ -15,9 +15,13 @@ mb-fixtures.workspace = true
 mb-formats.workspace = true
 mb-ir.workspace = true
 mb-jobs.workspace = true
+mb-api.workspace = true
 mb-plan.workspace = true
+mb-server.workspace = true
+mb-tui.workspace = true
 mb-surgery.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

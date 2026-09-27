@@ -5,6 +5,7 @@ use serde::Serialize;
 /// GGUF tensors count their true weights; packed safetensors (e.g. int4 in U8)
 /// count storage elements; see `QuantSummary` for bytes.
 #[derive(Clone, Debug, Default, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ParamBreakdown {
     pub total: u64,
     pub embedding: u64,

@@ -37,6 +37,7 @@ pub enum PlanError {
 /// mode = "qat"
 /// ```
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct Recipe {
     pub source: Source,
@@ -49,12 +50,14 @@ pub struct Recipe {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct Source {
     pub path: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct HardwareSpec {
     /// A single profile (shorthand for `profiles = [..]`).
@@ -64,6 +67,7 @@ pub struct HardwareSpec {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct ExportSpec {
     #[serde(default)]
@@ -71,6 +75,7 @@ pub struct ExportSpec {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct FeatureRequest {
     pub id: String,
     /// Every other key in the `[[feature]]` table.
@@ -135,6 +140,7 @@ pub fn parse_feature_spec(spec: &str) -> FeatureRequest {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct FeaturePlan {
     pub id: &'static str,
     pub title: &'static str,
@@ -150,6 +156,7 @@ pub struct FeaturePlan {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Plan {
     pub model: String,
     pub hardware: Vec<HardwareProfile>,

@@ -101,6 +101,41 @@ enum Command {
         #[command(subcommand)]
         op: job::JobOp,
     },
+    /// Start the web dashboard (and its JSON API) on this machine.
+    Serve {
+        #[arg(long, default_value_t = 7878)]
+        port: u16,
+        /// Address to bind. The server reads files and starts training jobs:
+        /// keep it on loopback unless the network is yours (then use an SSH tunnel if you can).
+        #[arg(long, default_value = "127.0.0.1")]
+        host: std::net::IpAddr,
+        /// The web UI build (default: web/dist of this checkout, or $MODELBUILDER_WEB_DIR).
+        #[arg(long, env = "MODELBUILDER_WEB_DIR")]
+        web_dir: Option<PathBuf>,
+        /// Python interpreter with `modelbuilder_train` installed, for training jobs.
+        #[arg(long, default_value = "python3", env = "MODELBUILDER_PYTHON")]
+        python: String,
+        /// Extra host names to accept in Host/Origin headers (repeatable), e.g. a tunnel's.
+        #[arg(long = "allow-host")]
+        allow_hosts: Vec<String>,
+    },
+    /// Terminal dashboard: a model's breakdown, its plan, and a live training job.
+    Tui {
+        /// A .gguf file or HF directory.
+        model: Option<PathBuf>,
+        /// Run this job spec and watch it.
+        #[arg(long, conflicts_with = "events")]
+        job: Option<PathBuf>,
+        /// Follow a job running elsewhere through its events file
+        /// (`python -m modelbuilder_train run job.json --events FILE`).
+        #[arg(long)]
+        events: Option<PathBuf>,
+        /// Hardware profiles for the plan (comma-separated); default: all.
+        #[arg(long, value_delimiter = ',')]
+        hardware: Vec<String>,
+        #[arg(long, default_value = "python3", env = "MODELBUILDER_PYTHON")]
+        python: String,
+    },
     /// Write a tiny synthetic checkpoint, for trying the tool without a real model.
     #[command(hide = true)]
     Fixture { kind: FixtureKind, out: PathBuf },
@@ -303,6 +338,61 @@ fn main() -> Result<()> {
             print!("{}", render::surgery(&report));
         }
         Command::Job { op } => job::run(op)?,
+        Command::Tui {
+            model,
+            job,
+            events,
+            hardware,
+            python,
+        } => {
+            use mb_api::jobs::JobSource;
+            let job = match (job, events) {
+                (Some(spec), _) => Some(JobSource::Spec {
+                    spec_path: spec.display().to_string(),
+                    python: None,
+                }),
+                (None, Some(e)) => Some(JobSource::Events {
+                    events_path: e.display().to_string(),
+                }),
+                (None, None) => None,
+            };
+            if model.is_none() && job.is_none() {
+                anyhow::bail!("give a model, --job <spec.json> or --events <file>");
+            }
+            mb_tui::run(mb_tui::Options {
+                model,
+                job,
+                hardware,
+                python,
+            })?;
+        }
+        Command::Serve {
+            port,
+            host,
+            web_dir,
+            python,
+            mut allow_hosts,
+        } => {
+            let web_dir = web_dir.or_else(|| {
+                let dev = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/dist");
+                dev.join("index.html").is_file().then_some(dev)
+            });
+            if !host.is_loopback() {
+                eprintln!(
+                    "warning: binding {host}: anyone who can reach it can read files and start jobs as you"
+                );
+                if !host.is_unspecified() {
+                    allow_hosts.push(host.to_string());
+                }
+            }
+            let cfg = mb_server::ServerConfig {
+                web_dir,
+                python,
+                extra_hosts: allow_hosts,
+            };
+            tokio::runtime::Runtime::new()?
+                .block_on(mb_server::serve(std::net::SocketAddr::new(host, port), cfg))?;
+        }
         Command::Fixture { kind, out } => {
             let path = match kind {
                 FixtureKind::LlamaGqa => mb_fixtures::llama_gqa(&out),

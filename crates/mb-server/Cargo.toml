@@ -1,0 +1,23 @@
+[package]
+name = "mb-server"
+description = "Local web API and static host for the modelbuilder web UI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axum.workspace = true
+futures-util.workspace = true
+mb-api = { workspace = true, features = ["ts"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+ts-rs.workspace = true
+
+[dev-dependencies]
+mb-fixtures.workspace = true
+tempfile.workspace = true
+tower.workspace = true

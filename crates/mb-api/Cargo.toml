@@ -1,0 +1,27 @@
+[package]
+name = "mb-api"
+description = "The operations behind the dashboards: inspect, stats, plan, jobs, file browsing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mb-analyze.workspace = true
+mb-features.workspace = true
+mb-formats.workspace = true
+mb-ir.workspace = true
+mb-jobs.workspace = true
+mb-plan.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ts-rs = { workspace = true, optional = true }
+
+[features]
+# TypeScript bindings for the web UI (mb-server enables it; its tests write web/src/api/types.ts).
+ts = ["dep:ts-rs", "mb-ir/ts", "mb-analyze/ts", "mb-features/ts", "mb-plan/ts", "mb-jobs/ts"]
+
+[dev-dependencies]
+mb-fixtures.workspace = true
+tempfile.workspace = true

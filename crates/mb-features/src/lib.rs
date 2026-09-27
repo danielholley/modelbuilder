@@ -78,6 +78,7 @@ impl<'a> Context<'a> {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "state", content = "detail", rename_all = "snake_case")]
 pub enum Detection {
     Absent,
@@ -87,6 +88,7 @@ pub enum Detection {
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Compat {
     /// Reasons the feature can't be applied as requested.
     pub blockers: Vec<String>,
@@ -102,6 +104,7 @@ impl Compat {
 
 /// A plugin's estimate before pricing on hardware.
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Estimate {
     pub effects: Vec<Effect>,
     pub stages: Vec<Stage>,

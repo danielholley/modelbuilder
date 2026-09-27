@@ -5,8 +5,9 @@ A tool for taking LLM checkpoints apart and rebuilding them with new features
 Given a model, it shows what the model contains and what it was trained for,
 and what adding a feature would cost.
 
-Status: early. `inspect`, `stats`, `plan` and the first surgery (`surgery mtp`)
-work. Training and the dashboards are still to come. See `CLAUDE.md` for the design and
+Status: early. `inspect`, `stats`, `plan`, the first surgery (`surgery mtp`),
+MTP-head training (`job mtp-align`) and the web and terminal dashboards work.
+See `CLAUDE.md` for the design and
 `docs/research/targets.md` for the first target (Bonsai 2 27B).
 
 ## Build and test
@@ -123,6 +124,33 @@ cargo run --release -- job mtp-align models/Ternary-Bonsai-2-27B-PQ2_0.gguf \
 `--emit-only` stops after writing `runs/<name>/job.json`. Copy the run
 directory to a GPU machine and run `modelbuilder job run job.json` (or
 `python -m modelbuilder_train run job.json`) there.
+
+## Dashboards
+
+Both dashboards show the same things: a model's breakdown, its weight
+statistics and K/V spectra (web only), what each feature would cost on each
+hardware profile, and a training job's progress as it runs.
+
+```sh
+# Web: build the UI once (Node 22+), then serve it with the API on http://localhost:7878
+(cd web && npm ci && npm run build)
+cargo run --release -- serve
+
+# Terminal, e.g. over SSH on the machine that trains
+cargo run --release -- tui models/Ternary-Bonsai-2-27B-PQ2_0.gguf
+cargo run --release -- tui --job runs/bonsai2-mtp/job.json          # run a job and watch it
+cargo run --release -- tui --events runs/bonsai2-mtp/events.jsonl   # follow one running elsewhere
+```
+
+A job started elsewhere writes its events with
+`python -m modelbuilder_train run job.json --events events.jsonl`, and both
+dashboards can follow that file. The web server only answers requests
+addressed to localhost, because it reads files and starts processes. To use
+it from another machine, forward the port over SSH (`ssh -L 7878:localhost:7878 box`)
+rather than binding it to a public address.
+
+For UI development, `cd web && npm run dev` serves on port 5173 and proxies
+`/api` to a running `modelbuilder serve`.
 
 Options for `inspect`: `--json` prints the full report as JSON, `--tensors` lists every
 tensor with its role, and `--context N` sets the context length used for the

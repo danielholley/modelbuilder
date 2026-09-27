@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::DType;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum SourceFormat {
     /// Hugging Face layout: `config.json` + one or more `.safetensors` shards.
@@ -15,6 +16,7 @@ pub enum SourceFormat {
 
 /// One entry of the tensor index. No tensor data is held here.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TensorInfo {
     pub name: String,
     pub dtype: DType,
@@ -40,6 +42,7 @@ impl TensorInfo {
 
 /// GGUF metadata value type ids, as stored on disk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum MetaType {
     U8 = 0,
@@ -82,6 +85,7 @@ impl MetaType {
 /// A GGUF metadata value. Integer widths are kept exactly so a read/write
 /// round trip produces the types llama.cpp expects.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum MetaValue {
     U8(u8),
@@ -193,6 +197,7 @@ impl MetaValue {
 
 /// Format-specific model metadata.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Metadata {
     /// Parsed `config.json`, plus any `__metadata__` from safetensors headers.
@@ -209,6 +214,7 @@ pub enum Metadata {
 
 /// Side files that carry provenance rather than weights.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct AuxFiles {
     pub tokenizer_config: Option<serde_json::Value>,
     pub generation_config: Option<serde_json::Value>,
@@ -220,6 +226,7 @@ pub struct AuxFiles {
 
 /// What a format reader produces: the tensor index and metadata, before normalization.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct RawModel {
     pub format: SourceFormat,
     /// The path the model was opened from.

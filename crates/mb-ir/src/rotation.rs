@@ -24,6 +24,7 @@ use crate::ConfigView;
 const PREFIX: &str = "prism.hadamard.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum SignMode {
     /// No sign flips (`s = 1`).
@@ -47,6 +48,7 @@ pub enum RotationError {
 /// An orthogonal rotation folded into the stored weights. Surgery has to keep
 /// new and modified tensors in the same basis and keep the metadata in sync.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct WeightRotation {
     pub scheme: String,
     pub version: Option<u64>,

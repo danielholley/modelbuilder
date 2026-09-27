@@ -63,6 +63,26 @@ jobs:
         env:
           MODELBUILDER_BIN: ${{ github.workspace }}/target/debug/modelbuilder
 
+  # The React dashboard. Its API types are generated from Rust; the `test`
+  # job's mb-server `types` test fails when web/src/api/types.ts is stale.
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
   # Re-derives the PQ2_0/PTQ1_0 golden vectors from the current PrismML fork.
   # A diff means the fork changed its block format; see
   # docs/research/prismml-quant-formats.md.
