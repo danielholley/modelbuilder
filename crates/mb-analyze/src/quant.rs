@@ -71,7 +71,7 @@ impl QuantSummary {
         for s in &mut by_dtype {
             s.bits_per_param = bits(s.bytes, s.params);
         }
-        by_dtype.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+        by_dtype.sort_by_key(|s| std::cmp::Reverse(s.bytes));
 
         let total_bytes: u64 = by_dtype.iter().map(|s| s.bytes).sum();
         let total_params: u64 = by_dtype.iter().map(|s| s.params).sum();
