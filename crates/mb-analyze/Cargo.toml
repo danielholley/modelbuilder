@@ -1,17 +1,19 @@
 [package]
 name = "mb-analyze"
-description = "Static structure, quantization, KV-cache and provenance analysis"
+description = "Static structure, quantization, KV-cache, provenance and weight-statistics analysis"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+mb-formats.workspace = true
 mb-ir.workspace = true
+nalgebra.workspace = true
+thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
 mb-fixtures.workspace = true
-mb-formats.workspace = true
 tempfile.workspace = true

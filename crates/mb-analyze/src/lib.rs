@@ -1,13 +1,14 @@
 //! Analyzers that turn a [`ModelIr`] into a [`Report`].
 //!
-//! Everything here works from the tensor index and metadata only; no tensor
-//! data is read. Weight statistics and behavioral probes build on top later.
+//! [`analyze`] works from the tensor index and metadata only; no tensor data is
+//! read. [`weights::weight_stats`] streams tensor data for weight statistics.
 
 mod kv;
 mod params;
 mod pattern;
 mod provenance;
 mod quant;
+pub mod weights;
 
 use mb_ir::{ModelIr, SourceFormat};
 use serde::Serialize;

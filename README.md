@@ -5,7 +5,7 @@ A tool for taking LLM checkpoints apart and rebuilding them with new features
 Given a model, it shows what the model contains and what it was trained for,
 and what adding a feature would cost.
 
-Status: early. `modelbuilder inspect` works. Planning, surgery, and training
+Status: early. `modelbuilder inspect` and `modelbuilder stats` work. Planning, surgery, and training
 are still to come. See `CLAUDE.md` for the design and
 `docs/research/targets.md` for the first target (Bonsai 2 27B).
 
@@ -45,6 +45,15 @@ cargo run --release -- inspect path/to/Ternary-Bonsai-2-27B-PQ2_0.gguf
 cargo run --release -- inspect path/to/Qwen3.8-27B/ --json > report.json
 ```
 
-Options: `--json` prints the full report as JSON, `--tensors` lists every
+Weight statistics stream every tensor (decoding PQ2_0/PTQ1_0 and undoing
+Bonsai's Hadamard rotation where needed). `--kv-spectra` adds per-layer K/V
+singular-value spectra:
+
+```sh
+cargo run --release -- stats path/to/model.gguf --kv-spectra
+cargo run --release -- stats path/to/model.gguf --only attn_k.,attn_v. --json
+```
+
+Options for `inspect`: `--json` prints the full report as JSON, `--tensors` lists every
 tensor with its role, and `--context N` sets the context length used for the
 KV-cache totals.

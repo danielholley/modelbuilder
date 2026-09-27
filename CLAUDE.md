@@ -21,7 +21,7 @@ wrong*. It then carries the change through to an exported model.
 ## Status
 
 The Rust core exists: `mb-ir`, `mb-formats`, `mb-analyze`, `mb-fixtures`, and
-the `modelbuilder` binary with `inspect`. Everything else in the layout below is
+the `modelbuilder` binary with `inspect` and `stats`. Everything else in the layout below is
 the target design, not code yet. Update this file when the real layout differs.
 
 Research on the first target (DeepSeek-V4.1-Flash KV techniques on Bonsai 2 27B)
@@ -45,6 +45,7 @@ cargo build
 cargo test --workspace
 cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings
 cargo run -- inspect <model.gguf | hf-dir> [--json] [--tensors] [--context N]
+cargo run --release -- stats <model> [--only substr,...] [--kv-spectra] [--top N] [--json]
 cargo run -- fixture qwen-hybrid /tmp/qh   # hidden: writes a tiny test checkpoint
 ```
 
@@ -99,7 +100,7 @@ Planned crates:
 |---|---|
 | `mb-ir` ✅ | Normalized Model IR: layers, attention/MLP/MoE blocks, tensors, dtypes and quant formats. All other crates speak this. No IO. |
 | `mb-formats` ✅ | Readers and writers for **HF safetensors + config.json** and **GGUF**. Uses mmap and streaming, and never materializes a full model. `dequant` decodes F32/F16/BF16/Q8_0/PQ2_0/PTQ1_0 to f32 one tensor at a time. |
-| `mb-analyze` ✅ (static, quant, KV, provenance) | Static, metadata, and weight-statistics analyzers. Weight statistics are not built yet. |
+| `mb-analyze` ✅ | Static, metadata/provenance, KV-cache, and weight-statistics analyzers. `weights` streams tensors a chunk of rows at a time: moments, kurtosis and channel outliers in the primal basis; zeros and ternary structure in the stored basis; K/V singular-value spectra (`nalgebra`). Activation-aware statistics need calibration data and belong to the Python side. |
 | `mb-fixtures` ✅ | Tiny synthetic checkpoints for tests (Llama GQA, Qwen3.8-like hybrid, DeepSeek MLA+MoE, mixed-quant GGUF). |
 | `mb-features` | Feature plugin trait plus the built-in features. |
 | `mb-plan` | Recipe parsing, compatibility resolution, stage ordering, and cost models. |
@@ -233,7 +234,8 @@ formats = ["safetensors", "gguf"]
 
 ## Conventions
 
-- Rust: stable toolchain, `cargo fmt`, `cargo clippy -- -D warnings`,
+- Rust: stable toolchain (MSRV 1.85, checked in CI; check a new dependency's
+  `rust-version` before adding it), `cargo fmt`, `cargo clippy -- -D warnings`,
   `cargo test` before committing. Use `thiserror` in libraries and `anyhow`
   only in binaries.
 - Python: 3.11+, `ruff` for lint and format, `pytest`, type hints throughout.
