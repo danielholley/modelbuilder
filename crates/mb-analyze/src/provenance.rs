@@ -4,6 +4,7 @@ use serde_json::Value;
 
 /// What the checkpoint says about where it came from and how it was trained.
 #[derive(Clone, Debug, Default, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Provenance {
     pub name: Option<String>,
     pub license: Option<String>,

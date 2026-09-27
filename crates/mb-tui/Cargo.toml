@@ -1,0 +1,18 @@
+[package]
+name = "mb-tui"
+description = "Terminal dashboard for modelbuilder (SSH and cloud boxes)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mb-api.workspace = true
+mb-features.workspace = true
+mb-ir.workspace = true
+mb-jobs.workspace = true
+ratatui.workspace = true
+
+[dev-dependencies]
+mb-fixtures.workspace = true
+tempfile.workspace = true

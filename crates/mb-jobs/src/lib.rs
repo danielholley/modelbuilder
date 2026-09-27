@@ -5,9 +5,11 @@
 //! tests round-trip the files in `schema/examples/`, which the Python tests
 //! validate too.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +32,7 @@ pub enum JobError {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct JobSpec {
     pub schema_version: u32,
@@ -45,12 +48,14 @@ pub struct JobSpec {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum Backend {
     Torch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum Device {
     Auto,
@@ -60,12 +65,14 @@ pub enum Device {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum StageKind {
     MtpAlign,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct Stage {
     pub name: String,
@@ -76,6 +83,7 @@ pub struct Stage {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct MtpAlign {
     pub reference_config: String,
@@ -94,6 +102,7 @@ fn default_eval_fraction() -> f64 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum TrainDtype {
     Float32,
@@ -101,6 +110,7 @@ pub enum TrainDtype {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(deny_unknown_fields)]
 pub struct Hyper {
     pub lr: f64,
@@ -199,6 +209,7 @@ impl JobSpec {
 
 /// A progress event from the Python side (`schema/events.v1.schema.json`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
     Started {
@@ -238,7 +249,7 @@ pub enum Event {
     Finished {
         status: String,
         #[serde(default)]
-        outputs: std::collections::BTreeMap<String, String>,
+        outputs: BTreeMap<String, String>,
     },
     Error {
         message: String,
@@ -247,6 +258,7 @@ pub enum Event {
 
 /// An event with its envelope fields.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct EventRecord {
     pub schema_version: u32,
     pub time: f64,
@@ -270,51 +282,108 @@ impl EventRecord {
     }
 }
 
-/// Runs `python -m modelbuilder_train run <spec>`, calling `on_event` for each
-/// event line as it arrives. Other stdout lines are passed to `on_other`;
-/// stderr goes straight to the terminal. Returns the `finished` outputs.
+/// A running `python -m modelbuilder_train run <spec>` process.
+///
+/// [`JobProcess::drive`] reads its events until it exits; [`JobProcess::kill`]
+/// can be called from another thread meanwhile (e.g. a dashboard's cancel button).
+pub struct JobProcess {
+    child: Mutex<Child>,
+    stdout: Mutex<Option<ChildStdout>>,
+    stderr: Mutex<Option<ChildStderr>>,
+}
+
+impl JobProcess {
+    /// Starts the Python side on `spec_path`. Its stderr goes to this process's stderr.
+    pub fn spawn(spec_path: &Path, python: &str) -> Result<Self, JobError> {
+        Self::spawn_with(spec_path, python, Stdio::inherit())
+    }
+
+    /// Like [`JobProcess::spawn`], with the child's stderr sent to `stderr`
+    /// (e.g. [`Stdio::null`] under a full-screen terminal UI).
+    pub fn spawn_with(spec_path: &Path, python: &str, stderr: Stdio) -> Result<Self, JobError> {
+        let mut child = Command::new(python)
+            .args(["-m", "modelbuilder_train", "run"])
+            .arg(spec_path)
+            .stdout(Stdio::piped())
+            .stderr(stderr)
+            .spawn()
+            .map_err(|source| JobError::Launch {
+                python: python.to_string(),
+                source,
+            })?;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        Ok(Self {
+            child: Mutex::new(child),
+            stdout: Mutex::new(stdout),
+            stderr: Mutex::new(stderr),
+        })
+    }
+
+    /// The child's stderr, when spawned with [`Stdio::piped`]; `None` after the first call.
+    pub fn take_stderr(&self) -> Option<ChildStderr> {
+        self.stderr.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    /// Stops the process. Harmless if it already exited.
+    pub fn kill(&self) {
+        let _ = self.child.lock().unwrap_or_else(|e| e.into_inner()).kill();
+    }
+
+    /// Calls `on_event` for each event line as it arrives and `on_other` for
+    /// any other stdout line, until the process exits. Returns the `finished`
+    /// outputs, or an error if the job failed or was killed. Call it once.
+    pub fn drive(
+        &self,
+        mut on_event: impl FnMut(&EventRecord),
+        mut on_other: impl FnMut(&str),
+    ) -> Result<BTreeMap<String, String>, JobError> {
+        let stdout = self
+            .stdout
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .ok_or_else(|| JobError::Spec("drive called twice".into()))?;
+        let mut finished = None;
+        let mut last_error = None;
+        for line in BufReader::new(stdout).lines() {
+            let line = line?;
+            match EventRecord::parse(&line) {
+                Ok(rec) => {
+                    match &rec.event {
+                        Event::Finished { status, outputs } => {
+                            finished = Some((status.clone(), outputs.clone()))
+                        }
+                        Event::Error { message } => last_error = Some(message.clone()),
+                        _ => {}
+                    }
+                    on_event(&rec);
+                }
+                Err(_) => on_other(&line),
+            }
+        }
+        let status = self
+            .child
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .wait()?;
+        match finished {
+            Some((s, outputs)) if s == "ok" && status.success() => Ok(outputs),
+            _ => Err(JobError::Failed(last_error.unwrap_or_else(|| {
+                format!("the Python side exited with {status}")
+            }))),
+        }
+    }
+}
+
+/// Runs a job to completion: [`JobProcess::spawn`] then [`JobProcess::drive`].
 pub fn run(
     spec_path: &Path,
     python: &str,
-    mut on_event: impl FnMut(&EventRecord),
-    mut on_other: impl FnMut(&str),
-) -> Result<std::collections::BTreeMap<String, String>, JobError> {
-    let mut child = Command::new(python)
-        .args(["-m", "modelbuilder_train", "run"])
-        .arg(spec_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|source| JobError::Launch {
-            python: python.to_string(),
-            source,
-        })?;
-    let stdout = child.stdout.take().expect("stdout is piped");
-    let mut finished = None;
-    let mut last_error = None;
-    for line in BufReader::new(stdout).lines() {
-        let line = line?;
-        match EventRecord::parse(&line) {
-            Ok(rec) => {
-                match &rec.event {
-                    Event::Finished { status, outputs } => {
-                        finished = Some((status.clone(), outputs.clone()))
-                    }
-                    Event::Error { message } => last_error = Some(message.clone()),
-                    _ => {}
-                }
-                on_event(&rec);
-            }
-            Err(_) => on_other(&line),
-        }
-    }
-    let status = child.wait()?;
-    match finished {
-        Some((s, outputs)) if s == "ok" && status.success() => Ok(outputs),
-        _ => Err(JobError::Failed(last_error.unwrap_or_else(|| {
-            format!("the Python side exited with {status}")
-        }))),
-    }
+    on_event: impl FnMut(&EventRecord),
+    on_other: impl FnMut(&str),
+) -> Result<BTreeMap<String, String>, JobError> {
+    JobProcess::spawn(spec_path, python)?.drive(on_event, on_other)
 }
 
 /// Inputs for an `mtp_align` job.

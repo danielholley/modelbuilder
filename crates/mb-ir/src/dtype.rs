@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 /// block-quantized GGUF types are carried as [`DType::Ggml`] so unknown or
 /// vendor-specific types (e.g. PrismML's `PQ2_0`) survive a round trip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum DType {
     Bool,
@@ -156,6 +157,7 @@ impl fmt::Display for DType {
 
 /// A GGML tensor type id. Ids outside the known table are kept verbatim.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct GgmlType(pub u32);
 
 /// `(id, name, elements per block, bytes per block)` for upstream ggml types.

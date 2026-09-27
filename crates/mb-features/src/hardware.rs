@@ -7,6 +7,7 @@
 use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum Backend {
     Cuda,
@@ -14,6 +15,7 @@ pub enum Backend {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct HardwareProfile {
     pub id: &'static str,
     pub description: &'static str,

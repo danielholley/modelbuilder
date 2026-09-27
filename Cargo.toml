@@ -1,5 +1,5 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
@@ -17,7 +17,12 @@ mb-fixtures = { path = "crates/mb-fixtures" }
 mb-jobs = { path = "crates/mb-jobs" }
 mb-plan = { path = "crates/mb-plan" }
 mb-surgery = { path = "crates/mb-surgery" }
+mb-api = { path = "crates/mb-api" }
+mb-server = { path = "crates/mb-server" }
+mb-tui = { path = "crates/mb-tui" }
 anyhow = "1"
+axum = "0.8"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 clap = { version = "4", features = ["derive", "env"] }
 memmap2 = "0.9"
 nalgebra = { version = "0.33", default-features = false, features = ["std"] }
@@ -25,4 +30,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tempfile = "3"
 thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs"] }
 toml = "0.9"
+# ratatui 0.30 needs Rust 1.86; 0.29 keeps the 1.85 MSRV.
+ratatui = "0.29"
+ts-rs = { version = "12", features = ["serde-json-impl", "no-serde-warnings"] }

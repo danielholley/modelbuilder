@@ -9,6 +9,7 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum AttentionKind {
     /// Multi-head attention: one KV head per query head.
@@ -22,6 +23,7 @@ pub enum AttentionKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct MlaSpec {
     pub kv_lora_rank: Option<u64>,
     pub q_lora_rank: Option<u64>,
@@ -31,6 +33,7 @@ pub struct MlaSpec {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct AttentionSpec {
     pub kind: AttentionKind,
     pub num_heads: Option<u64>,
@@ -45,6 +48,7 @@ pub struct AttentionSpec {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct LinearAttentionSpec {
     /// e.g. `gated_deltanet`, `mamba`, `rwkv`, or `unknown`.
     pub variant: String,
@@ -57,6 +61,7 @@ pub struct LinearAttentionSpec {
 
 /// The token-mixing block of a layer.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Mixer {
     Attention(AttentionSpec),
@@ -65,6 +70,7 @@ pub enum Mixer {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct MoeSpec {
     pub num_experts: Option<u64>,
     pub experts_per_token: Option<u64>,
@@ -73,6 +79,7 @@ pub struct MoeSpec {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FfnSpec {
     Dense { intermediate_size: Option<u64> },
@@ -81,6 +88,7 @@ pub enum FfnSpec {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Layer {
     pub index: u32,
     pub mixer: Mixer,
@@ -89,6 +97,7 @@ pub struct Layer {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct RopeInfo {
     pub theta: Option<f64>,
     pub scaling: Option<Value>,
@@ -104,6 +113,7 @@ fn is_real_rope_scaling(v: &Value) -> bool {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct MtpInfo {
     pub num_modules: u64,
     pub tensor_count: usize,
@@ -112,6 +122,7 @@ pub struct MtpInfo {
 
 /// Normalized, format-independent view of a model checkpoint.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ModelIr {
     pub family: Option<String>,
     pub architectures: Vec<String>,

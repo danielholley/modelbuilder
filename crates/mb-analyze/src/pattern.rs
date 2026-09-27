@@ -65,6 +65,7 @@ pub fn layer_label(layer: &Layer) -> String {
 /// Run-length encoded layer layout: `repeats × [count × label, ...]`, plus a prefix
 /// of leading layers that don't fit the repeating block (e.g. DeepSeek's dense first layers).
 #[derive(Clone, Debug, PartialEq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct LayerPattern {
     pub prefix: Vec<(usize, String)>,
     pub repeats: usize,

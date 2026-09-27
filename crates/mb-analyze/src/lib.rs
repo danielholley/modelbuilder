@@ -20,6 +20,7 @@ pub use provenance::Provenance;
 pub use quant::{DTypeStat, QuantSummary};
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SourceSummary {
     pub format: SourceFormat,
     pub path: String,
@@ -28,6 +29,7 @@ pub struct SourceSummary {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ArchSummary {
     pub family: Option<String>,
     pub architectures: Vec<String>,
@@ -44,6 +46,7 @@ pub struct ArchSummary {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Report {
     pub source: SourceSummary,
     pub architecture: ArchSummary,

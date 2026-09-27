@@ -48,6 +48,7 @@ pub struct WeightStatsOptions {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TensorStats {
     pub name: String,
     pub dtype: String,
@@ -72,6 +73,7 @@ pub struct TensorStats {
 
 /// Singular-value summary of one attention layer's K and V projections.
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct KvSpectrum {
     pub layer: u32,
     /// Rows of K and of V (`kv_heads × head_dim` each), and the input width.
@@ -85,6 +87,7 @@ pub struct KvSpectrum {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct SpectrumSummary {
     /// Smallest rank capturing 90%, 95% and 99% of the squared singular values.
     pub energy_rank_90: usize,
@@ -96,6 +99,7 @@ pub struct SpectrumSummary {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct WeightStatsReport {
     pub tensors: Vec<TensorStats>,
     pub kv_spectra: Vec<KvSpectrum>,

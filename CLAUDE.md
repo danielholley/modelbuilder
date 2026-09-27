@@ -23,11 +23,13 @@ wrong*. It then carries the change through to an exported model.
 The Rust core exists: `mb-ir`, `mb-formats`, `mb-analyze`, `mb-fixtures`,
 `mb-features` (plugin trait, three plugins, cost model), `mb-plan` (recipes and
 plans), `mb-surgery` (MTP head port, primal tensor export), `mb-jobs` (job
-specs and the Python launcher), and the `modelbuilder` binary with `inspect`,
-`stats`, `plan`, `features`, `surgery mtp`, `export-tensors` and `job`. The
-Python side (`python/modelbuilder_train`) trains an MTP head against a frozen
-trunk (`mtp_align`, see `docs/research/mtp-align.md`). The UIs are not built
-yet. Everything else in the layout below is
+specs and the Python launcher), `mb-api` (the dashboards' operations and
+types), `mb-server` (web API), `mb-tui` (terminal UI), and the `modelbuilder`
+binary with `inspect`, `stats`, `plan`, `features`, `surgery mtp`,
+`export-tensors`, `job`, `serve` and `tui`. The Python side
+(`python/modelbuilder_train`) trains an MTP head against a frozen trunk
+(`mtp_align`, see `docs/research/mtp-align.md`). The React UI is in `web/`.
+Everything else in the layout below is
 the target design, not code yet. Update this file when the real layout differs.
 
 Research on the first target (DeepSeek-V4.1-Flash KV techniques on Bonsai 2 27B)
@@ -59,7 +61,14 @@ cargo run --release -- surgery mtp <target.gguf> --from <hf-reference> -o <name>
 cargo run --release -- export-tensors <model> --names a,b [--dtype bf16|f32] -o out.safetensors
 cargo run --release -- job mtp-align <target.gguf> --from <hf-reference> --features <dir> -o runs/<name> [--emit-only]
 cargo run --release -- job run runs/<name>/job.json
+cargo run --release -- serve [--port 7878] [--web-dir web/dist]   # web dashboard + JSON API on localhost
+cargo run --release -- tui [<model>] [--job job.json | --events events.jsonl]
 cargo run -- fixture qwen-hybrid /tmp/qh   # hidden: writes a tiny test checkpoint
+
+# Web UI (web/): once, then check, test, build (serve picks up web/dist)
+cd web && npm ci && npm run format:check && npm run typecheck && npm test && npm run build
+npm run dev                                  # Vite on :5173, proxies /api to `serve` on :7878
+UPDATE_TYPES=1 cargo test -p mb-server --test types   # regenerate web/src/api/types.ts after changing API types
 
 # Python side (python/): once, then lint and test
 python -m venv python/.venv && python/.venv/bin/pip install -e "python[torch,dev]"
@@ -124,9 +133,10 @@ Planned crates:
 | `mb-plan` ✅ | Recipe parsing (TOML) and plan assembly: detection, compatibility, estimates priced per hardware profile. Stage ordering across features is not built yet. |
 | `mb-surgery` ✅ (MTP) | Writes new checkpoints with a feature added, streaming from the inputs' mmaps. `mtp::port_mtp_sidecar` ports an HF MTP head into an MTP-only GGUF sidecar for `qwen35` targets, following the PrismML fork's converter; see `docs/research/mtp-port.md` for how it was verified end to end. `export::export_primal` writes selected tensors decoded and un-rotated to safetensors for training. |
 | `mb-jobs` ✅ | Job spec and event types (mirroring `schema/`), spec builders (`mtp_align_spec`), and `run`, which launches `python -m modelbuilder_train run` and streams its events. |
-| `mb-server` | Local web API (axum) that serves the React UI. |
-| `mb-tui` | Terminal dashboard (ratatui) for SSH and cloud boxes. |
-| `modelbuilder` | Binary that launches `serve` (web), `tui`, and headless subcommands for scripting and CI. |
+| `mb-api` ✅ | What the dashboards can do, as plain functions and serde types: `inspect`, `stats`, `plan`, `catalog`, `fs::list` (model picker), and `jobs::JobManager` (run a spec with the Python side or follow an events file; cursor-based updates, cancel). With the `ts` feature every type derives `ts_rs::TS`. |
+| `mb-server` ✅ | Local web API (axum) over `mb-api` plus the static web build. Binds loopback and rejects requests whose `Host`/`Origin` isn't localhost (or `--allow-host`), since it reads files and starts processes. Job updates stream as SSE. `types::typescript()` generates `web/src/api/types.ts`. |
+| `mb-tui` ✅ | Terminal dashboard (ratatui 0.29, for the MSRV) over `mb-api`: overview, tensors, plan, live job. `App` is testable headless with `TestBackend`. |
+| `modelbuilder` ✅ | Binary: `serve` (web), `tui`, and the headless subcommands for scripting and CI. |
 
 The web UI and TUI are both clients of the same core. Put logic in library
 crates, never in the UI layers.
@@ -135,7 +145,18 @@ crates, never in the UI layers.
 
 React + TypeScript + Vite, in `web/`. It talks to `mb-server` over a JSON API
 whose types are generated from the Rust report types, so they are never
-hand-written twice.
+hand-written twice: `web/src/api/types.ts` comes from `mb-server`'s
+`types::typescript()`, and a Rust test fails when it is stale. Pages:
+Inspect, Weights (stats and K/V spectra), Plan (feature picker or recipe
+TOML), Jobs (start or follow a job, live curves over SSE).
+
+- No UI framework or chart library: charts are small SVG components in
+  `components/charts.tsx`, following the dataviz method (categorical slots in
+  fixed order, one y axis, hover tooltips, legends plus direct labels, light
+  and dark tokens in `styles.css`). Status badges always pair color with an
+  icon and a label.
+- Pure logic (formatting, scales, merging job updates) lives in `src/lib/`
+  with Vitest tests. Prettier formats everything except the generated types.
 
 ### IR conventions
 
