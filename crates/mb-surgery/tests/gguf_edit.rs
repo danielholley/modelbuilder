@@ -49,6 +49,25 @@ fn prune_keeps_the_hybrid_pattern_and_the_rotation_list() {
         assert!(p.tensor(n.as_str().unwrap()).is_some(), "{n:?}");
     }
     assert_eq!(pir.weight_rotation.is_some(), ir.weight_rotation.is_some());
+
+    // export-hf drops the pruned layers from the reference config too.
+    let reference = mb_fixtures::hybrid_mtp_reference(&dir.path().join("ref"));
+    let hf = dir.path().join("hf");
+    let opts = mb_surgery::hf_export::HfExportOptions {
+        reference,
+        dtype: mb_ir::DType::F32,
+        shard_bytes: 1 << 30,
+        layers: None,
+        globals: true,
+        overwrite: false,
+    };
+    mb_surgery::hf_export::export_hf(&p, &pir, &hf, &opts).unwrap();
+    let cfg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(hf.join("config.json")).unwrap()).unwrap();
+    assert_eq!(cfg["num_hidden_layers"], 4);
+    if let Some(types) = cfg["layer_types"].as_array() {
+        assert_eq!(types.len(), 4);
+    }
 }
 
 #[test]

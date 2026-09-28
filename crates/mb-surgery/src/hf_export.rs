@@ -159,6 +159,40 @@ fn write_mapped(
     Ok(())
 }
 
+/// `modelbuilder.pruned_layers` (`start..end`), written by `surgery prune`.
+fn pruned_layers(ir: &ModelIr) -> Option<(usize, usize)> {
+    let mb_ir::Metadata::Gguf { kv, .. } = &ir.raw.metadata else {
+        return None;
+    };
+    let v = kv.iter().find(|(k, _)| k == "modelbuilder.pruned_layers")?.1.as_str()?;
+    let (a, b) = v.split_once("..")?;
+    Some((a.parse().ok()?, b.parse().ok()?))
+}
+
+/// Removes layers `a..b` from a reference config: `num_hidden_layers`, and
+/// every per-layer array (e.g. `layer_types`).
+fn prune_config(cfg: &mut Value, a: usize, b: usize) {
+    let Some(o) = cfg.as_object_mut() else {
+        return;
+    };
+    let Some(n) = o.get("num_hidden_layers").and_then(Value::as_u64) else {
+        return;
+    };
+    for v in o.values_mut() {
+        if let Value::Array(items) = v {
+            if items.len() == n as usize {
+                let mut i = 0;
+                items.retain(|_| {
+                    let keep = !(a..b).contains(&i);
+                    i += 1;
+                    keep
+                });
+            }
+        }
+    }
+    o.insert("num_hidden_layers".into(), json!(n as usize - (b - a)));
+}
+
 /// Writes `out_dir/{config.json, model-XXXXX-of-YYYYY.safetensors,
 /// model.safetensors.index.json, tokenizer files}`.
 pub fn export_hf(
@@ -174,7 +208,11 @@ pub fn export_hf(
         )));
     }
     let adapter = arch::adapter(ir.family.as_deref().unwrap_or("unknown"))?;
-    let (full_cfg, t) = text_config(&opts.reference)?;
+    let (full_cfg, mut t) = text_config(&opts.reference)?;
+    let pruned = pruned_layers(ir);
+    if let Some((a, b)) = pruned {
+        prune_config(&mut t, a, b);
+    }
     let dims = Dims::from_config(&t, adapter)?;
     if ir.layers.len() != dims.layers {
         return Err(SurgeryError::Incompatible(format!(
@@ -439,6 +477,11 @@ fn write_all(
         notes.push(format!(
             "Partial export: layers {a}..{b} only (config.json still describes all {}).",
             dims.layers
+        ));
+    }
+    if let Some((a, b)) = pruned_layers(ir) {
+        notes.push(format!(
+            "The GGUF was pruned (layers {a}..{b} removed); config.json drops them too."
         ));
     }
     if copied.is_empty() {
