@@ -1,6 +1,6 @@
 //! Orthogonal rotations folded into stored weights.
 //!
-//! PrismML's Bonsai 2 checkpoints store every foldable weight in a blockwise
+//! PrismML's quantized checkpoints store every foldable weight in a blockwise
 //! Hadamard basis. The runtime (PrismML-Eng/llama.cpp, `build_lora_mm` in
 //! `src/llama-graph.cpp`) computes
 //!

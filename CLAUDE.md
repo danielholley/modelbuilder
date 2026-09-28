@@ -58,7 +58,7 @@ cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings
 cargo run -- inspect <model.gguf | hf-dir> [--json] [--tensors] [--context N]
 cargo run --release -- stats <model> [--only substr,...] [--kv-spectra] [--top N] [--json]
 cargo run -- plan <model> [-f id[:k=v,...]]... [--hardware ids] [--json]   # no -f: whole catalog
-cargo run -- plan --recipe examples/recipes/bonsai2-kv-and-mtp.toml
+cargo run -- plan --recipe examples/recipes/kv-and-mtp.toml
 cargo run -- features                        # catalog and hardware profiles
 cargo run --release -- surgery mtp <target.gguf> --from <hf-reference> -o <name>-mtp.gguf
 cargo run --release -- export-tensors <model> --names a,b [--dtype bf16|f32] -o out.safetensors
@@ -240,7 +240,7 @@ what that source actually specifies, not on what the name suggests.
 
 Users compose features in a declarative recipe file (TOML); the UIs will read
 and write the same format. `mb_plan::Recipe` defines it, and
-`examples/recipes/bonsai2-kv-and-mtp.toml` is a working example (a test keeps it
+`examples/recipes/kv-and-mtp.toml` is a working example (a test keeps it
 valid). Every key in a `[[feature]]` table other than `id` is passed to the
 plugin as a parameter, and each plugin rejects unknown keys.
 

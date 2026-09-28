@@ -37,7 +37,7 @@
       "additionalProperties": false,
       "required": ["reference_config", "frozen_tensors", "embedding_tensor", "lm_head_tensor", "features"],
       "properties": {
-        "reference_config": { "type": "string", "description": "HF config.json giving the head's shapes (e.g. Qwen3.8-27B)." },
+        "reference_config": { "type": "string", "description": "HF config.json giving the head's shapes (e.g. the base model the head is ported from)." },
         "init_head": { "type": ["string", "null"], "description": "Directory or file with mtp.* tensors to start from; null for random init." },
         "frozen_tensors": { "type": "string", "description": "safetensors with the target's token embedding and output head in the primal basis (modelbuilder export-tensors)." },
         "embedding_tensor": { "type": "string" },

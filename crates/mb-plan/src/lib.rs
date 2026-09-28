@@ -23,14 +23,14 @@ pub enum PlanError {
 ///
 /// ```toml
 /// [source]
-/// path = "models/Ternary-Bonsai-2-27B-PQ2_0.gguf"
+/// path = "models/target.gguf"
 ///
 /// [hardware]
 /// profiles = ["1x24GB", "8xH100"]
 ///
 /// [[feature]]
 /// id = "mtp"
-/// from = "models/Qwen3.8-27B"
+/// from = "models/base-model"
 ///
 /// [[feature]]
 /// id = "fp4-kv"

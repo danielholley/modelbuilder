@@ -11,12 +11,12 @@
       "name": "mtp-align",
       "kind": "mtp_align",
       "mtp_align": {
-        "reference_config": "models/Qwen3.8-27B/config.json",
-        "init_head": "models/Qwen3.8-27B",
+        "reference_config": "models/base-model/config.json",
+        "init_head": "models/base-model",
         "frozen_tensors": "runs/mtp-align-example/frozen.safetensors",
         "embedding_tensor": "token_embd.weight",
         "lm_head_tensor": "output.weight",
-        "features": "runs/features/bonsai2",
+        "features": "runs/features/target",
         "eval_fraction": 0.05
       },
       "hyper": {

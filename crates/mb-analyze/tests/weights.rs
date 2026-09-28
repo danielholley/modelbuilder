@@ -15,7 +15,7 @@ fn all() -> WeightStatsOptions {
 }
 
 #[test]
-fn bonsai_like_gguf() {
+fn hybrid_ternary_gguf() {
     let dir = tempfile::tempdir().unwrap();
     let (model, ir) = open(&mb_fixtures::gguf_hybrid_ternary(dir.path()));
     let r = weight_stats(&model, &ir, &all()).unwrap();

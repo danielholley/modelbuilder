@@ -16,7 +16,7 @@ use mb_ir::{AttentionKind, Mixer, ModelIr, RotationError, TensorInfo, TensorKind
 use nalgebra::DMatrix;
 use serde::Serialize;
 
-/// Group size used to test for ternary structure (matches Bonsai's g128).
+/// Group size used to test for ternary structure (the group size of ternary formats such as PrismML's PQ2_0).
 const TERNARY_GROUP: usize = 128;
 /// Rows are decoded in chunks of about this many elements.
 const CHUNK_ELEMS: usize = 1 << 22;

@@ -1,0 +1,28 @@
+# Plan three features for one model: an FP4 KV cache, cross-layer KV sharing,
+# and an MTP head for self-speculative decoding.
+#
+#   cargo run --release -- plan --recipe examples/recipes/kv-and-mtp.toml
+#
+# Paths are placeholders: point them at your files. `plan` only reads
+# headers, so sparse or header-only copies are enough.
+
+[source]
+path = "models/target.gguf"           # a .gguf file or an HF directory
+
+[hardware]
+profiles = ["1x24GB", "1x80GB", "8xH100"]   # `modelbuilder features` lists them
+
+[[feature]]
+id = "fp4-kv"
+mode = "qat"          # or "ptq": runtime-only, no training
+
+[[feature]]
+id = "kv-share"
+group = 2             # global-attention layers per shared KV
+
+[[feature]]
+id = "mtp"
+from = "models/base-model"   # a reference model with an MTP head to port (optional)
+
+[export]
+formats = ["gguf"]

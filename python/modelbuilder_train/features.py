@@ -2,7 +2,7 @@
 
 A frozen-trunk stage such as MTP alignment only needs the trunk's outputs, so
 they are computed once with the runtime that already runs the model (the
-PrismML llama.cpp fork for Bonsai 2), not by loading the trunk in PyTorch.
+llama.cpp, or the fork that supports its quantization), not by loading the trunk in PyTorch.
 
 Layout of a feature directory::
 

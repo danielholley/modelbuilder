@@ -12,7 +12,7 @@ fn find<'a>(p: &'a mb_plan::Plan, id: &str) -> &'a FeaturePlan {
 }
 
 #[test]
-fn whole_catalog_on_bonsai_like() {
+fn whole_catalog_on_hybrid_ternary() {
     let dir = tempfile::tempdir().unwrap();
     let ir = load(&mb_fixtures::gguf_hybrid_ternary(dir.path()));
     let ctx = Context::new(&ir, None);
@@ -77,7 +77,7 @@ fn kv_share_with_group_two() {
 fn mtp_detected_and_reference_checks() {
     let dir = tempfile::tempdir().unwrap();
     let qwen = load(&mb_fixtures::qwen_hybrid(&dir.path().join("q")));
-    let bonsai = load(&mb_fixtures::gguf_hybrid_ternary(&dir.path().join("b")));
+    let target = load(&mb_fixtures::gguf_hybrid_ternary(&dir.path().join("b")));
     let hw = resolve_hardware(&["1x24GB".into()]).unwrap();
     let mtp = [parse_feature_spec("mtp")];
 
@@ -86,7 +86,7 @@ fn mtp_detected_and_reference_checks() {
     assert!(matches!(p.features[0].detection, Detection::Present(_)));
 
     // Porting from a reference with different shapes is blocked.
-    let ctx = Context::new(&bonsai, Some(&qwen));
+    let ctx = Context::new(&target, Some(&qwen));
     let p = plan(&ctx, &mtp, &hw).unwrap();
     let blockers = &p.features[0].compat.blockers;
     assert!(
@@ -95,7 +95,7 @@ fn mtp_detected_and_reference_checks() {
     );
 
     // A `from` path that wasn't loaded is a blocker, not a panic.
-    let ctx = Context::new(&bonsai, None);
+    let ctx = Context::new(&target, None);
     let p = plan(&ctx, &[parse_feature_spec("mtp:from=/nowhere")], &hw).unwrap();
     assert!(p.features[0].compat.blockers[0].contains("was not loaded"));
 }
@@ -133,10 +133,17 @@ fn mla_model_and_bad_params() {
 
 #[test]
 fn example_recipes_parse() {
-    let r = mb_plan::Recipe::parse(include_str!(
-        "../../../examples/recipes/bonsai2-kv-and-mtp.toml"
-    ))
-    .unwrap();
+    // The generic example, and the task-specific one kept with the runbooks.
+    for text in [
+        include_str!("../../../examples/recipes/kv-and-mtp.toml"),
+        include_str!("../../../docs/runbooks/bonsai2-kv-and-mtp.toml"),
+    ] {
+        example_recipe_is_valid(text);
+    }
+}
+
+fn example_recipe_is_valid(text: &str) {
+    let r = mb_plan::Recipe::parse(text).unwrap();
     assert_eq!(
         r.features.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
         ["fp4-kv", "kv-share", "mtp"]

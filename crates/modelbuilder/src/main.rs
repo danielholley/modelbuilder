@@ -63,7 +63,7 @@ enum Command {
         #[arg(long)]
         recipe: Option<PathBuf>,
         /// Feature spec, `id` or `id:key=value,...` (repeatable), e.g.
-        /// `kv-share:group=2` or `mtp:from=models/Qwen3.8-27B`.
+        /// `kv-share:group=2` or `mtp:from=models/base-model`.
         #[arg(long = "feature", short = 'f')]
         features: Vec<String>,
         /// Hardware profiles (comma-separated); default: all.
@@ -90,12 +90,12 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Export a qwen35 GGUF (e.g. Ternary-Bonsai-2-27B) as a Hugging Face
-    /// checkpoint for PyTorch: decoded, un-rotated, with the converter's
-    /// tensor transforms undone. Needs the reference HF model's config.json.
+    /// Export a GGUF as a Hugging Face checkpoint for PyTorch: decoded,
+    /// un-rotated, with llama.cpp's converter transforms undone (architecture
+    /// adapters: llama, qwen2, qwen3, qwen35). Needs a reference HF config.json.
     ExportHf {
         model: PathBuf,
-        /// Reference HF model directory (config.json, tokenizer), e.g. Qwen3.8-27B.
+        /// Reference HF model directory (config.json, tokenizer) with the same architecture.
         #[arg(long)]
         reference: PathBuf,
         #[arg(long, short = 'o')]
@@ -192,9 +192,9 @@ enum SurgeryOp {
     /// GGUF sidecar for a GGUF target whose architecture llama.cpp runs with
     /// nextn layers (run it with `-md <sidecar> --spec-type draft-mtp`).
     Mtp {
-        /// Target model (.gguf), e.g. Ternary-Bonsai-2-27B-PQ2_0.gguf.
+        /// Target model (.gguf).
         target: PathBuf,
-        /// Reference HF model directory with `mtp.*` tensors, e.g. Qwen3.8-27B.
+        /// Reference HF model directory with `mtp.*` tensors (e.g. the target's base model).
         #[arg(long)]
         from: PathBuf,
         /// Output sidecar path. Put "mtp" in the name so the fork can find it next to the model.

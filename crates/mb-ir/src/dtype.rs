@@ -195,7 +195,7 @@ const GGML_TYPES: &[(u32, &str, u64, u64)] = &[
     (35, "TQ2_0", 256, 66),
     (39, "MXFP4", 32, 17),
     // PrismML vendor types (PrismML-Eng/llama.cpp fork, not upstream). Ternary
-    // {-1,0,+1} with one FP16 scale per 128 weights. Layouts match the Bonsai 2
+    // {-1,0,+1} with one FP16 scale per 128 weights. Layouts match PrismML's
     // model card and the sizes measured from tensor offsets in the released GGUFs.
     (142, "PQ2_0", 128, 34),  // 2-bit slot per trit: 2.125 bits/weight
     (143, "PTQ1_0", 128, 28), // dense trit packing: 1.75 bits/weight

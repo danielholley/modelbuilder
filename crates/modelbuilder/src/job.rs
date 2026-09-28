@@ -40,7 +40,7 @@ pub struct PythonArgs {
 
 #[derive(Args)]
 pub struct MtpAlignArgs {
-    /// Target model (.gguf), e.g. Ternary-Bonsai-2-27B-PQ2_0.gguf.
+    /// Target model (.gguf).
     target: PathBuf,
     /// Reference HF model directory with `mtp.*` tensors (config and initial head).
     #[arg(long)]

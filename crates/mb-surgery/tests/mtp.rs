@@ -27,7 +27,7 @@ fn ports_the_head_into_an_mtp_only_sidecar() {
     let dir = tempfile::tempdir().unwrap();
     let (target, target_ir) = open(&mb_fixtures::gguf_hybrid_ternary(&dir.path().join("b")));
     let (reference, reference_ir) = open(&mb_fixtures::hybrid_mtp_reference(&dir.path().join("q")));
-    let out = dir.path().join("bonsai-like-mtp.gguf");
+    let out = dir.path().join("target-mtp.gguf");
     let report = port_mtp_sidecar(
         &target,
         &target_ir,

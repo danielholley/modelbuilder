@@ -1,6 +1,6 @@
 # Plan FP4 KV, cross-layer KV sharing and an MTP head for Bonsai 2 27B.
 #
-#   cargo run --release -- plan --recipe examples/recipes/bonsai2-kv-and-mtp.toml
+#   cargo run --release -- plan --recipe docs/runbooks/bonsai2-kv-and-mtp.toml
 #
 # Paths are placeholders: point them at your downloads. `plan` only reads
 # headers, so sparse or header-only copies are enough.
