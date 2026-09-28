@@ -16,7 +16,7 @@ use serde::Deserialize;
 use super::{gib, global_attention_layers};
 use crate::{
     parse_params, Compat, Confidence, Context, Detection, Effect, Estimate, Feature, FeatureError,
-    Params, QualityRisk, Range, RiskLevel, Stage,
+    Params, QualityRisk, Range, RiskLevel, Stage, TrunkUse,
 };
 
 pub struct Mtp;
@@ -150,13 +150,16 @@ impl Feature for Mtp {
                 if ported { "realign the ported" } else { "train a fresh" }
             ),
             trainable_params: n_head,
-            // Gradients stop at the head: the trunk only runs forward.
-            backprop_params: n_head,
+            // Gradients stop at the head, but flow through the frozen LM head
+            // (the loss is on its logits). The trunk only runs forward.
+            backprop_params: n_head + ctx.ir.vocab_size.unwrap_or(0) * ctx.ir.hidden_size.unwrap_or(0),
             tokens,
             seq_len: 4096,
             loss: "cross-entropy on token t+2 from the trunk's hidden state at t and the embedding of t+1".into(),
             data: "the target model's own generations (self-distillation), so drafts match what verification accepts; prompts from chat, code and reasoning sets".into(),
             teacher_forward: false,
+            trunk: TrunkUse::Frozen,
+            precomputed_features: true,
         }];
         Ok(Estimate {
             effects,

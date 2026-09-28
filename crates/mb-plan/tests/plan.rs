@@ -52,8 +52,9 @@ fn whole_catalog_on_hybrid_ternary() {
     );
     let st = &mtp.estimate.as_ref().unwrap().stages[0];
     assert_eq!(
-        st.trainable_params, st.backprop_params,
-        "gradients stop at the head"
+        st.trainable_params + 256 * 128,
+        st.backprop_params,
+        "gradients stop at the head, after flowing through the frozen LM head (vocab 256 × hidden 128)"
     );
 }
 
@@ -152,4 +153,43 @@ fn example_recipe_is_valid(text: &str) {
     for f in &r.features {
         mb_features::feature(&f.id).unwrap();
     }
+}
+
+#[test]
+fn schedule_orders_restructure_then_adapt_then_frozen() {
+    let dir = tempfile::tempdir().unwrap();
+    let ir = load(&mb_fixtures::gguf_hybrid_ternary(dir.path()));
+    let ctx = Context::new(&ir, None);
+    let hw = resolve_hardware(&["1x24GB".into()]).unwrap();
+    // Requested in the "wrong" order on purpose.
+    let reqs = ["mtp", "fp4-kv", "kv-share:group=2"].map(parse_feature_spec);
+    let p = plan(&ctx, &reqs, &hw).unwrap();
+    let order: Vec<(&str, &str)> = p
+        .schedule
+        .stages
+        .iter()
+        .map(|s| (s.feature.as_str(), s.stage.as_str()))
+        .collect();
+    assert_eq!(
+        order,
+        [
+            ("kv-share", "reuse-adapt"),
+            ("kv-share", "long-context"),
+            ("fp4-kv", "kv-fp4-qat"),
+            ("mtp", "mtp-align")
+        ]
+    );
+    assert_eq!(p.schedule.stages[0].order, 1);
+    assert!(p.schedule.notes.iter().any(|n| n.contains("Frozen-trunk")));
+    // Totals: one per profile, summing every stage's training FLOPs.
+    let t = &p.schedule.totals[0];
+    let sum: f64 = p
+        .features
+        .iter()
+        .flat_map(|f| f.compute.iter())
+        .map(|c| c.train_flops.low)
+        .sum();
+    assert!((t.train_flops.low - sum).abs() <= sum * 1e-9);
+    // The MTP stage precomputes features, so extraction is priced separately.
+    assert!(t.extraction_gpu_hours.is_some());
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
-import type { Catalog, ComputeEstimate, FeaturePlan, Fit, Plan } from "../api/types";
+import type { Catalog, ComputeEstimate, FeaturePlan, Fit, Plan, Schedule } from "../api/types";
 import { RangeBar } from "../components/charts";
 import { Card, ErrorBox, KV, Notes, Status, useCall, useStored, type Tone } from "../components/ui";
 import { bytes, count, range } from "../lib/format";
@@ -29,6 +29,7 @@ function Compute({ rows }: { rows: ComputeEstimate[] }) {
               <span className="muted">log scale</span>
             </th>
             <th className="num">wall-clock</th>
+            <th className="num">extraction</th>
             <th className="num">peak / GPU</th>
             <th>fits</th>
           </tr>
@@ -50,6 +51,9 @@ function Compute({ rows }: { rows: ComputeEstimate[] }) {
                   />
                 </td>
                 <td className="num">{range(c.wall_hours.low, c.wall_hours.high, "h")}</td>
+                <td className="num" title="GPU-hours to precompute trunk features (one trunk forward per token), outside training">
+                  {c.extraction_gpu_hours ? range(c.extraction_gpu_hours.low, c.extraction_gpu_hours.high, "h") : "–"}
+                </td>
                 <td className="num" title={`packed trunk: ${c.peak_gib_per_gpu_packed_trunk.toFixed(1)} GiB`}>
                   {c.peak_gib_per_gpu.toFixed(1)} GiB
                 </td>
@@ -222,9 +226,50 @@ function effect(v: number, unit: string): string {
   return `${Number.isInteger(v) ? v : v.toFixed(2)}${unit ? ` ${unit}` : ""}`;
 }
 
+const TRUNK: Record<string, string> = { restructure: "restructures the trunk", adapt: "adapts trunk weights", frozen: "trunk frozen" };
+
+function ScheduleCard({ schedule }: { schedule: Schedule }) {
+  if (schedule.stages.length === 0) return null;
+  return (
+    <Card title="Schedule">
+      <p className="secondary" style={{ marginTop: 0 }}>
+        The order to train the compatible features in, and the whole run's cost per hardware profile.
+      </p>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>feature</th>
+              <th>stage</th>
+              <th>trunk</th>
+              <th>why here</th>
+            </tr>
+          </thead>
+          <tbody>
+            {schedule.stages.map((s) => (
+              <tr key={s.order}>
+                <td>{s.order}</td>
+                <td className="mono">{s.feature}</td>
+                <td>{s.stage}</td>
+                <td>{TRUNK[s.trunk]}</td>
+                <td className="secondary">{s.reason}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <h3 style={{ marginTop: 12 }}>Total</h3>
+      <Compute rows={schedule.totals} />
+      {schedule.notes.length > 0 && <Notes items={schedule.notes} />}
+    </Card>
+  );
+}
+
 export function PlanView({ plan }: { plan: Plan }) {
   return (
     <div className="stack">
+      <ScheduleCard schedule={plan.schedule} />
       {plan.features.map((f) => (
         <FeatureCard key={`${f.id}-${JSON.stringify(f.params)}`} f={f} />
       ))}

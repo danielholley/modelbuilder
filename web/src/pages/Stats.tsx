@@ -198,8 +198,8 @@ export function StatsPage({ model }: { model: string }) {
           </button>
         </div>
         <p className="muted" style={{ marginBottom: 0 }}>
-          Streams every selected tensor from disk one at a time. On a model with tens of billions of parameters this takes minutes; filter to the projections you care about
-          to go faster.
+          Streams every selected tensor from disk one at a time. On a model with tens of billions of parameters this takes minutes; filter
+          to the projections you care about to go faster.
         </p>
       </Card>
       <ErrorBox error={error} />

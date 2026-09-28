@@ -19,7 +19,9 @@ use mb_ir::ModelIr;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-pub use estimate::{Confidence, CostInputs, Effect, QualityRisk, Range, RiskLevel, Stage};
+pub use estimate::{
+    Confidence, CostInputs, Effect, QualityRisk, Range, RiskLevel, Stage, TrunkUse,
+};
 pub use features::catalog;
 
 /// Feature parameters, e.g. from a recipe's `[[feature]]` table.

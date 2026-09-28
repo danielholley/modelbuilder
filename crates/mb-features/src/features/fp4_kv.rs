@@ -8,7 +8,7 @@ use serde::Deserialize;
 use super::{backprop_params_from, global_attention_layers, params_of};
 use crate::{
     parse_params, Compat, Confidence, Context, Detection, Effect, Estimate, Feature, FeatureError,
-    Params, QualityRisk, Range, RiskLevel, Stage,
+    Params, QualityRisk, Range, RiskLevel, Stage, TrunkUse,
 };
 use mb_ir::TensorKind;
 
@@ -123,6 +123,8 @@ impl Feature for Fp4Kv {
                     loss: "KL divergence to the same model with a BF16 KV cache (self-distillation)".into(),
                     data: "general text with a share of long documents; the model's own generations work, since the teacher is the unmodified model".into(),
                     teacher_forward: true,
+                trunk: TrunkUse::Adapt,
+                precomputed_features: false,
                 }]
             }
         };
