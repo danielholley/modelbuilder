@@ -57,7 +57,7 @@ jobs:
           python-version: "3.11"
       - run: cargo build -p modelbuilder
       - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
-      - run: pip install -e "python[dev]"
+      - run: pip install -e "python[dev,hf]"
       - run: ruff check python && ruff format --check python
       - run: pytest -q python/tests
         env:

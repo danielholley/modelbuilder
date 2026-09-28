@@ -85,7 +85,7 @@ npm run dev                                  # Vite on :5173, proxies /api to `s
 UPDATE_TYPES=1 cargo test -p mb-server --test types   # regenerate web/src/api/types.ts after changing API types
 
 # Python side (python/): once, then lint and test
-python -m venv python/.venv && python/.venv/bin/pip install -e "python[torch,dev]"
+python -m venv python/.venv && python/.venv/bin/pip install -e "python[torch,dev,hf]"
 cd python && .venv/bin/ruff check . && .venv/bin/ruff format --check . && .venv/bin/pytest -q
 python -m modelbuilder_train extract-features --llama-bin <fork>/build/bin --model <target.gguf> --texts texts.jsonl --out <dir>
 python -m modelbuilder_train probe perplexity|needle|kv-cache|hf-vs-gguf ...
