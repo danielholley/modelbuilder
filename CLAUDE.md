@@ -21,16 +21,22 @@ wrong*. It then carries the change through to an exported model.
 ## Status
 
 The Rust core exists: `mb-ir`, `mb-formats`, `mb-analyze`, `mb-fixtures`,
-`mb-features` (plugin trait, three plugins, cost model), `mb-plan` (recipes and
-plans), `mb-surgery` (MTP head port, primal tensor export), `mb-jobs` (job
-specs and the Python launcher), `mb-api` (the dashboards' operations and
-types), `mb-server` (web API), `mb-tui` (terminal UI), and the `modelbuilder`
-binary with `inspect`, `stats`, `plan`, `features`, `surgery mtp`,
-`export-tensors`, `job`, `serve` and `tui`. The Python side
-(`python/modelbuilder_train`) trains an MTP head against a frozen trunk
-(`mtp_align`, see `docs/research/mtp-align.md`). The React UI is in `web/`.
-Everything else in the layout below is
-the target design, not code yet. Update this file when the real layout differs.
+`mb-features` (plugin trait, eight plugins, cost model), `mb-plan` (recipes,
+plans and stage scheduling), `mb-surgery` (architecture adapters, GGUF↔HF
+export and write-back, MTP head port, pruning, YaRN), `mb-jobs` (job specs and
+the Python launcher), `mb-api`, `mb-server` and `mb-tui` (dashboards), and the
+`modelbuilder` binary. The Python side (`python/modelbuilder_train`) trains an
+MTP head against a frozen trunk (`mtp_align`, see `docs/research/mtp-align.md`),
+retrains trunk tensors with KV-cache or weight QAT (`trunk_distill`), and runs
+probes. The React UI is in `web/`. Anything in the layout below not marked ✅
+is the target design, not code yet. Update this file when the real layout
+differs.
+
+The code must work on any model: nothing in `crates/`, `python/`, `web/` or
+`schema/` may be specific to one checkpoint. Architecture differences go in
+data tables (`mb-surgery/src/arch.rs`, the `FAMILIES` table in
+`python/modelbuilder_train/mtp/model.py`); notes and scripts for a specific
+target go in `docs/runbooks/`.
 
 What's done, what's measured, and the plan for the next work are in
 `docs/STATUS.md`. Keep it current when a piece of the plan lands.
@@ -61,6 +67,11 @@ cargo run -- plan <model> [-f id[:k=v,...]]... [--hardware ids] [--json]   # no 
 cargo run -- plan --recipe examples/recipes/kv-and-mtp.toml
 cargo run -- features                        # catalog and hardware profiles
 cargo run --release -- surgery mtp <target.gguf> --from <hf-reference> -o <name>-mtp.gguf
+cargo run --release -- export-hf <model.gguf> --reference <hf-dir> [--dtype f32] -o <hf-out>
+cargo run --release -- surgery replace <model.gguf> --updates <hf-dir> -o new.gguf [--max-rel-error 1e-3]
+cargo run --release -- surgery prune <model.gguf> --layers a..b -o new.gguf
+cargo run --release -- surgery yarn <model.gguf> --factor 4 -o new.gguf
+cargo run --release -- job trunk-distill <model.gguf> --reference <hf-dir> --texts t.jsonl --kv-format q4_0 -o runs/<name>
 cargo run --release -- export-tensors <model> --names a,b [--dtype bf16|f32] -o out.safetensors
 cargo run --release -- job mtp-align <target.gguf> --from <hf-reference> --features <dir> -o runs/<name> [--emit-only]
 cargo run --release -- job run runs/<name>/job.json
@@ -77,6 +88,7 @@ UPDATE_TYPES=1 cargo test -p mb-server --test types   # regenerate web/src/api/t
 python -m venv python/.venv && python/.venv/bin/pip install -e "python[torch,dev]"
 cd python && .venv/bin/ruff check . && .venv/bin/ruff format --check . && .venv/bin/pytest -q
 python -m modelbuilder_train extract-features --llama-bin <fork>/build/bin --model <target.gguf> --texts texts.jsonl --out <dir>
+python -m modelbuilder_train probe perplexity|needle|kv-cache|hf-vs-gguf ...
 ```
 
 To inspect a real multi-GB model without downloading it, fetch only the
@@ -129,12 +141,12 @@ Planned crates:
 | Crate | Responsibility |
 |---|---|
 | `mb-ir` ✅ | Normalized Model IR: layers, attention/MLP/MoE blocks, tensors, dtypes and quant formats. All other crates speak this. No IO. |
-| `mb-formats` ✅ | Readers and writers for **HF safetensors + config.json** and **GGUF**. Uses mmap and streaming, and never materializes a full model. `dequant` decodes F32/F16/BF16/Q8_0/PQ2_0/PTQ1_0 to f32 one tensor at a time. |
+| `mb-formats` ✅ | Readers and writers for **HF safetensors + config.json** and **GGUF**. Uses mmap and streaming, and never materializes a full model. `dequant` decodes F32/F16/BF16/Q8_0/PQ2_0/PTQ1_0 to f32 one tensor at a time; `quant` encodes them with ggml's reference quantizers. |
 | `mb-analyze` ✅ | Static, metadata/provenance, KV-cache, and weight-statistics analyzers. `weights` streams tensors a chunk of rows at a time: moments, kurtosis and channel outliers in the primal basis; zeros and ternary structure in the stored basis; K/V singular-value spectra (`nalgebra`). Activation-aware statistics need calibration data and belong to the Python side. |
 | `mb-fixtures` ✅ | Tiny synthetic checkpoints for tests (Llama GQA, Qwen3.8-like hybrid, DeepSeek MLA+MoE, mixed-quant GGUF). |
-| `mb-features` ✅ | Feature plugin trait, hardware profiles, and the training cost model (`estimate`). Plugins: `fp4-kv`, `kv-share`, `mtp`. `surgery_outline` describes checkpoint changes; executing them belongs to `mb-surgery`. |
-| `mb-plan` ✅ | Recipe parsing (TOML) and plan assembly: detection, compatibility, estimates priced per hardware profile. Stage ordering across features is not built yet. |
-| `mb-surgery` ✅ (MTP) | Writes new checkpoints with a feature added, streaming from the inputs' mmaps. `mtp::port_mtp_sidecar` ports an HF MTP head into an MTP-only GGUF sidecar for `qwen35` targets, following the PrismML fork's converter; see `docs/research/mtp-port.md` for how it was verified end to end. `export::export_primal` writes selected tensors decoded and un-rotated to safetensors for training. |
+| `mb-features` ✅ | Feature plugin trait, hardware profiles, and the training cost model (`estimate`). Plugins: `fp4-kv`, `kv-share`, `mla`, `mtp`, `draft-head`, `yarn`, `prune-layers`, `moe-upcycle`. `surgery_outline` describes checkpoint changes; executing them belongs to `mb-surgery`. |
+| `mb-plan` ✅ | Recipe parsing (TOML) and plan assembly: detection, compatibility, estimates priced per hardware profile, and a schedule across features (restructure → adapt → frozen). |
+| `mb-surgery` ✅ | Writes new checkpoints with a feature added, streaming from the inputs' mmaps. `mtp::port_mtp_sidecar` ports an HF MTP head into an MTP-only GGUF sidecar for `qwen35` targets, following the PrismML fork's converter; see `docs/research/mtp-port.md` for how it was verified end to end. `export::export_primal` writes selected tensors decoded and un-rotated to safetensors for training. `arch` holds the per-architecture adapters (GGUF ↔ HF names and the converter's transforms); `hf_export` writes a whole GGUF as an HF checkpoint plus a source-quantization manifest; `replace` writes trained tensors back in their original types and basis; `gguf_edit` prunes layers and sets YaRN metadata. |
 | `mb-jobs` ✅ | Job spec and event types (mirroring `schema/`), spec builders (`mtp_align_spec`), and `run`, which launches `python -m modelbuilder_train run` and streams its events. |
 | `mb-api` ✅ | What the dashboards can do, as plain functions and serde types: `inspect`, `stats`, `plan`, `catalog`, `fs::list` (model picker), and `jobs::JobManager` (run a spec with the Python side or follow an events file; cursor-based updates, cancel). With the `ts` feature every type derives `ts_rs::TS`. |
 | `mb-server` ✅ | Local web API (axum) over `mb-api` plus the static web build. Binds loopback and rejects requests whose `Host`/`Origin` isn't localhost (or `--allow-host`), since it reads files and starts processes. Job updates stream as SSE. `types::typescript()` generates `web/src/api/types.ts`. |
@@ -187,8 +199,12 @@ TOML), Jobs (start or follow a job, live curves over SSE).
   (`mtp_align`) from precomputed trunk features, so it never loads the trunk:
   features come from the runtime that serves the model (`features.py`, llama.cpp
   for PrismML GGUFs), frozen tensors from `modelbuilder export-tensors`.
-- `hf`: transformers + accelerate (FSDP/DeepSpeed) + PEFT, for stages that train
-  the trunk. Planned.
+- `hf` ✅ (partial): `trunk_distill` loads an `export-hf` checkpoint in
+  transformers and retrains selected tensors against the unmodified weights.
+  A KV-cache fake-quantizer and cross-layer sharing are registered as an
+  attention implementation, and weights are fake-quantized through their
+  source format (`hf/`). One device per process for now; FSDP and PEFT are
+  planned.
 - `mlx`: Apple Silicon, planned.
 - `backends/torchtitan`: multi-node continued pretraining, planned.
 
