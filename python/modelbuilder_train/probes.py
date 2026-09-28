@@ -240,3 +240,52 @@ def perplexity_hf(
         "tokens": count,
         "ppl": math.exp(nll / max(count, 1)),
     }
+
+
+@dataclass
+class HiddenMatch:
+    tokens: int
+    #: mean and worst per-token cosine similarity of the final (post-norm) hidden states
+    cosine_mean: float
+    cosine_min: float
+    #: ‖hf − gguf‖ / ‖gguf‖ over all tokens
+    rel_rms: float
+    #: fraction of tokens whose next-token argmax (through the HF LM head) agrees
+    top1_agreement: float
+
+
+def hf_vs_gguf(server, hf_dir: Path, texts: list[str], max_tokens: int = 512, device: str = "auto") -> HiddenMatch:
+    """Checks an HF export against the GGUF it came from, token for token.
+
+    ``server`` runs the GGUF with ``--embeddings --pooling none`` (see
+    ``Server.launch(embeddings=True)``), which returns the final post-norm
+    hidden state per token. The same token ids go through the HF model; both
+    hidden states are also pushed through the HF LM head to compare argmaxes.
+    Use a pruned GGUF (``modelbuilder surgery prune``) to check a big model on
+    a small machine.
+    """
+    import torch
+    from transformers import AutoModelForCausalLM
+
+    from modelbuilder_train.mtp.train import pick_device
+
+    dev = pick_device(device)
+    model = AutoModelForCausalLM.from_pretrained(hf_dir, dtype=torch.float32).to(dev).eval()
+    head = model.get_output_embeddings()
+    cos_all, err, norm, agree, n = [], 0.0, 0.0, 0, 0
+    with torch.no_grad():
+        for text in texts:
+            ids = server.tokenize(text)[:max_tokens]
+            if len(ids) < 2:
+                continue
+            ref = server.hidden_states(ids).to(dev)
+            got = model.get_decoder()(input_ids=torch.tensor([ids], device=dev)).last_hidden_state[0].float()
+            cos_all.append(torch.nn.functional.cosine_similarity(got, ref, dim=-1))
+            err += float((got - ref).pow(2).sum())
+            norm += float(ref.pow(2).sum())
+            agree += int((head(got).argmax(-1) == head(ref).argmax(-1)).sum())
+            n += len(ids)
+    if not n:
+        raise ValueError("no text with at least 2 tokens")
+    cos = torch.cat(cos_all)
+    return HiddenMatch(n, float(cos.mean()), float(cos.min()), (err / max(norm, 1e-30)) ** 0.5, agree / n)

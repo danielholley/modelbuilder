@@ -126,6 +126,20 @@ def cmd_probe(args: argparse.Namespace) -> int:
                               progress=_needle_progress)  # fmt: skip
         report = {"model": r.model, "accuracy": r.accuracy, "trials": [asdict(t) for t in r.trials]}
         print(f"retrieval accuracy {100 * r.accuracy:.1f}% over {len(r.trials)} trials")
+    elif args.probe == "hf-vs-gguf":
+        from modelbuilder_train.server import Server
+
+        texts = [json.loads(line)["text"] for line in Path(args.texts).read_text().splitlines() if line.strip()]
+        with Server.launch(
+            Path(args.llama_bin), Path(args.model), port=args.port, embeddings=True, ctx=args.ctx,
+            threads=args.threads, gpu_layers=args.gpu_layers,
+        ) as s:  # fmt: skip
+            r = probes.hf_vs_gguf(s, Path(args.hf), texts, max_tokens=args.ctx, device=args.device)
+        report = asdict(r)
+        print(
+            f"{r.tokens} tokens: cosine mean {r.cosine_mean:.6f} (min {r.cosine_min:.6f}), "
+            f"relative RMS {r.rel_rms:.2e}, top-1 agreement {100 * r.top1_agreement:.2f}%"
+        )
     else:  # kv-cache
         report = probes.kv_cache_sweep(
             Path(args.llama_bin), Path(args.model), types=args.types.split(","),
@@ -370,6 +384,12 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--cache-type-k", default="f16")
     q.add_argument("--cache-type-v", default="f16")
     q.add_argument("--port", type=int, default=8093)
+    probe_common(q)
+    q = psub.add_parser("hf-vs-gguf", help="check an HF export against its GGUF, token by token (hidden states)")
+    q.add_argument("--hf", required=True, help="HF directory from `modelbuilder export-hf`")
+    q.add_argument("--texts", required=True, help="JSONL with a `text` per line")
+    q.add_argument("--device", default="auto")
+    q.add_argument("--port", type=int, default=8094)
     probe_common(q)
     q = psub.add_parser("kv-cache", help="perplexity and retrieval per KV cache type, vs f16")
     q.add_argument("--types", default="q8_0,q4_0", help="llama.cpp cache types, e.g. q8_0,q5_0,q4_0")

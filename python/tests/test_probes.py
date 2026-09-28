@@ -71,3 +71,29 @@ def test_needle_finds_short_and_misses_long():
         httpd.shutdown()
     assert [t.found for t in r.trials] == [True, True, True, False, False, False]
     assert r.accuracy == 0.5
+
+
+def test_hf_vs_gguf_matches_a_model_against_itself(tmp_path: Path):
+    """A fake server that answers with the HF model's own hidden states: a perfect match."""
+    transformers = pytest.importorskip("transformers")
+    import torch
+
+    cfg = transformers.LlamaConfig(
+        vocab_size=64, hidden_size=32, intermediate_size=64, num_hidden_layers=2,
+        num_attention_heads=4, num_key_value_heads=2, max_position_embeddings=128,
+    )  # fmt: skip
+    torch.manual_seed(0)
+    model = transformers.LlamaForCausalLM(cfg)
+    model.save_pretrained(tmp_path / "hf")
+
+    class Fake:
+        def tokenize(self, text: str) -> list[int]:
+            return [ord(c) % 64 for c in text]
+
+        def hidden_states(self, ids: list[int]) -> torch.Tensor:
+            with torch.no_grad():
+                return model.model(input_ids=torch.tensor([ids])).last_hidden_state[0]
+
+    r = probes.hf_vs_gguf(Fake(), tmp_path / "hf", ["hello world", "x"], device="cpu")
+    assert r.tokens == 11 and r.top1_agreement == 1.0
+    assert r.cosine_min > 0.99999 and r.rel_rms < 1e-5
