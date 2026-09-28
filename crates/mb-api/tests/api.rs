@@ -15,7 +15,7 @@ fn s(p: &Path) -> String {
 #[test]
 fn inspect_stats_and_plan_a_fixture() {
     let dir = tempfile::tempdir().unwrap();
-    let path = s(&mb_fixtures::gguf_bonsai_like(dir.path()));
+    let path = s(&mb_fixtures::gguf_hybrid_ternary(dir.path()));
 
     let r = mb_api::inspect(&InspectRequest {
         path: path.clone(),
@@ -94,7 +94,7 @@ fn catalog_lists_features_and_hardware() {
 #[test]
 fn lists_directories_with_model_kinds() {
     let dir = tempfile::tempdir().unwrap();
-    mb_fixtures::gguf_bonsai_like(&dir.path().join("g"));
+    mb_fixtures::gguf_hybrid_ternary(&dir.path().join("g"));
     mb_fixtures::llama_gqa(&dir.path().join("hf"));
     std::fs::write(dir.path().join("recipe.toml"), "").unwrap();
     std::fs::write(dir.path().join(".hidden"), "").unwrap();

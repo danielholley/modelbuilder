@@ -14,7 +14,7 @@ fn find<'a>(p: &'a mb_plan::Plan, id: &str) -> &'a FeaturePlan {
 #[test]
 fn whole_catalog_on_bonsai_like() {
     let dir = tempfile::tempdir().unwrap();
-    let ir = load(&mb_fixtures::gguf_bonsai_like(dir.path()));
+    let ir = load(&mb_fixtures::gguf_hybrid_ternary(dir.path()));
     let ctx = Context::new(&ir, None);
     let hw = resolve_hardware(&["1x24GB".into(), "8xH100".into()]).unwrap();
     let p = plan(&ctx, &[], &hw).unwrap();
@@ -60,7 +60,7 @@ fn whole_catalog_on_bonsai_like() {
 #[test]
 fn kv_share_with_group_two() {
     let dir = tempfile::tempdir().unwrap();
-    let ir = load(&mb_fixtures::gguf_bonsai_like(dir.path()));
+    let ir = load(&mb_fixtures::gguf_hybrid_ternary(dir.path()));
     let ctx = Context::new(&ir, None);
     let hw = resolve_hardware(&["8xH100".into()]).unwrap();
     let p = plan(&ctx, &[parse_feature_spec("kv-share:group=2")], &hw).unwrap();
@@ -77,7 +77,7 @@ fn kv_share_with_group_two() {
 fn mtp_detected_and_reference_checks() {
     let dir = tempfile::tempdir().unwrap();
     let qwen = load(&mb_fixtures::qwen_hybrid(&dir.path().join("q")));
-    let bonsai = load(&mb_fixtures::gguf_bonsai_like(&dir.path().join("b")));
+    let bonsai = load(&mb_fixtures::gguf_hybrid_ternary(&dir.path().join("b")));
     let hw = resolve_hardware(&["1x24GB".into()]).unwrap();
     let mtp = [parse_feature_spec("mtp")];
 

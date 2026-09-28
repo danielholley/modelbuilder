@@ -66,7 +66,7 @@ fn safetensors_sharded_to_single_file() {
 fn gguf_is_byte_identical_after_rewrite() {
     let dir = tempfile::tempdir().unwrap();
     assert_gguf_round_trip(&mb_fixtures::gguf_mixed_quant(dir.path()));
-    assert_gguf_round_trip(&mb_fixtures::gguf_bonsai_like(dir.path()));
+    assert_gguf_round_trip(&mb_fixtures::gguf_hybrid_ternary(dir.path()));
 }
 
 fn assert_gguf_round_trip(path: &std::path::Path) {

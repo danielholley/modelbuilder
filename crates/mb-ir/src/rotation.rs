@@ -183,6 +183,44 @@ impl WeightRotation {
         }
         Ok(())
     }
+
+    /// The inverse of [`Self::to_primal`]: a primal row back to the stored
+    /// basis, `w_stored = H · (s ⊙ w)` (H is symmetric and orthogonal, and
+    /// `s ⊙ s = 1`). New or retrained weights go through this before they are
+    /// re-quantized, so they stay in the checkpoint's rotated basis.
+    pub fn from_primal(&self, name: &str, row: &mut [f32]) -> Result<(), RotationError> {
+        if !self.is_rotated(name) {
+            return Err(RotationError::NotRotated(name.to_string()));
+        }
+        let block = self
+            .block_size
+            .ok_or_else(|| RotationError::Metadata("missing block_size".into()))?
+            as usize;
+        if block == 0 || !block.is_power_of_two() {
+            return Err(RotationError::Metadata(format!(
+                "block size {block} is not a power of two"
+            )));
+        }
+        if row.len() % block != 0 {
+            return Err(RotationError::BadLength {
+                len: row.len(),
+                block,
+            });
+        }
+        if self.sign_mode == SignMode::Explicit {
+            let s = self
+                .signs
+                .get(&(row.len() as u64))
+                .ok_or(RotationError::NoSigns(row.len()))?;
+            for (x, s) in row.iter_mut().zip(s) {
+                *x *= s;
+            }
+        }
+        for chunk in row.chunks_exact_mut(block) {
+            fwht_normalized(chunk);
+        }
+        Ok(())
+    }
 }
 
 /// In-place fast Walsh-Hadamard transform, normalized by `1/sqrt(n)`.
@@ -306,8 +344,14 @@ mod tests {
         let primal: f32 = w.iter().zip(&x).map(|(a, b)| a * b).sum();
         assert!((runtime - primal).abs() < 1e-5);
 
+        let folded = stored.clone();
         rot.to_primal("blk.0.attn_q.weight", &mut stored).unwrap();
         for (a, b) in stored.iter().zip(&w) {
+            assert!((a - b).abs() < 1e-5);
+        }
+        // And from_primal folds it back.
+        rot.from_primal("blk.0.attn_q.weight", &mut stored).unwrap();
+        for (a, b) in stored.iter().zip(&folded) {
             assert!((a - b).abs() < 1e-5);
         }
     }

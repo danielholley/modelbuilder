@@ -134,9 +134,9 @@ fn gguf_mixed_quant() {
 
 /// The ternary GGUF path, shaped like the released Ternary-Bonsai-2-27B files.
 #[test]
-fn gguf_bonsai_like() {
+fn gguf_hybrid_ternary() {
     let dir = tempfile::tempdir().unwrap();
-    let ir = load(&mb_fixtures::gguf_bonsai_like(dir.path()));
+    let ir = load(&mb_fixtures::gguf_hybrid_ternary(dir.path()));
     assert!(ir.warnings.is_empty(), "{:?}", ir.warnings);
     let r = analyze(&ir, None);
     assert_eq!(

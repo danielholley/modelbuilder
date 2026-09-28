@@ -1,5 +1,6 @@
 //! Port an MTP head from a Hugging Face reference model into a GGUF sidecar
-//! for a `qwen35` target (the Qwen3.8-27B → Ternary-Bonsai-2-27B case).
+//! for a target GGUF of the same architecture (typically a quantized or
+//! fine-tuned derivative of the reference, which lacks the head).
 //!
 //! Layout and conversion follow the PrismML-Eng/llama.cpp fork:
 //! - `conversion/qwen.py` (`_QwenMtpMixin`): `mtp.layers.0.*` becomes
@@ -7,11 +8,11 @@
 //!   `mtp.pre_fc_norm_hidden` and `mtp.norm` become `blk.{n_layer}.nextn.{eh_proj,
 //!   enorm, hnorm, shared_head_norm}`; `block_count` grows by one and
 //!   `{arch}.nextn_predict_layers` is written.
-//! - `Qwen3NextModel.modify_tensors`: every `*norm.weight` (except
-//!   `linear_attn.norm`) is stored with 1 added (zero-centered RMSNorm). This
-//!   was also checked against Bonsai 2's own F32 norms, which match Qwen3.8's
-//!   plus one (cosine 1.0000).
-//! - `src/models/qwen35.cpp`: a file with nextn layers but no `blk.0` trunk
+//! - Norm weights follow the architecture adapter ([`crate::arch`]): for
+//!   zero-centered RMSNorm families (`Qwen3NextModel.modify_tensors`) they are
+//!   stored with 1 added.
+//! - `src/models/qwen35.cpp` (the first architecture with an adapter that has
+//!   `nextn`): a file with nextn layers but no `blk.0` trunk
 //!   loads as an MTP-only model (`mtp_only`), with its own token embedding,
 //!   output norm and output head. `common/speculative.cpp` runs it as the draft
 //!   for `--spec-type draft-mtp`, fed with the target's hidden states.
@@ -28,93 +29,8 @@ use mb_formats::dequant::dequantize;
 use mb_formats::{gguf, LoadedModel, TensorToWrite};
 use mb_ir::{DType, MetaType, MetaValue, Metadata, Mixer, ModelIr, SourceFormat, TensorInfo};
 
+use crate::arch;
 use crate::{f32_to_bf16, SurgeryError, SurgeryReport, WrittenTensor};
-
-/// Target architectures whose MTP layout has been checked against the loader.
-const SUPPORTED_ARCHS: &[&str] = &["qwen35"];
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Transform {
-    /// Weight matrix: copied if BF16, converted to BF16 otherwise.
-    Matrix,
-    /// RMSNorm weight: +1, stored as F32.
-    NormPlusOne,
-}
-
-/// `(reference suffix after "mtp.", GGUF suffix after "blk.{n}.", transform)`.
-const TENSOR_MAP: &[(&str, &str, Transform)] = &[
-    ("fc.weight", "nextn.eh_proj.weight", Transform::Matrix),
-    (
-        "pre_fc_norm_embedding.weight",
-        "nextn.enorm.weight",
-        Transform::NormPlusOne,
-    ),
-    (
-        "pre_fc_norm_hidden.weight",
-        "nextn.hnorm.weight",
-        Transform::NormPlusOne,
-    ),
-    (
-        "norm.weight",
-        "nextn.shared_head_norm.weight",
-        Transform::NormPlusOne,
-    ),
-    (
-        "layers.0.input_layernorm.weight",
-        "attn_norm.weight",
-        Transform::NormPlusOne,
-    ),
-    (
-        "layers.0.post_attention_layernorm.weight",
-        "post_attention_norm.weight",
-        Transform::NormPlusOne,
-    ),
-    (
-        "layers.0.self_attn.q_proj.weight",
-        "attn_q.weight",
-        Transform::Matrix,
-    ),
-    (
-        "layers.0.self_attn.k_proj.weight",
-        "attn_k.weight",
-        Transform::Matrix,
-    ),
-    (
-        "layers.0.self_attn.v_proj.weight",
-        "attn_v.weight",
-        Transform::Matrix,
-    ),
-    (
-        "layers.0.self_attn.o_proj.weight",
-        "attn_output.weight",
-        Transform::Matrix,
-    ),
-    (
-        "layers.0.self_attn.q_norm.weight",
-        "attn_q_norm.weight",
-        Transform::NormPlusOne,
-    ),
-    (
-        "layers.0.self_attn.k_norm.weight",
-        "attn_k_norm.weight",
-        Transform::NormPlusOne,
-    ),
-    (
-        "layers.0.mlp.gate_proj.weight",
-        "ffn_gate.weight",
-        Transform::Matrix,
-    ),
-    (
-        "layers.0.mlp.up_proj.weight",
-        "ffn_up.weight",
-        Transform::Matrix,
-    ),
-    (
-        "layers.0.mlp.down_proj.weight",
-        "ffn_down.weight",
-        Transform::Matrix,
-    ),
-];
 
 /// Tensors the sidecar copies verbatim from the target (the MTP-only loader
 /// needs its own embedding, final norm and output head).
@@ -158,11 +74,13 @@ pub fn port_mtp_sidecar(
         ));
     }
     let arch = target_ir.family.clone().unwrap_or_default();
-    if !SUPPORTED_ARCHS.contains(&arch.as_str()) {
+    let adapter = arch::adapter(&arch)?;
+    if !adapter.nextn {
         return Err(SurgeryError::Unsupported(format!(
-            "target architecture `{arch}`; the MTP layout is verified for {SUPPORTED_ARCHS:?}"
+            "the `{arch}` architecture has no MTP (nextn) layout in the adapter table (crates/mb-surgery/src/arch.rs)"
         )));
     }
+    let tensor_map = arch::nextn_map(adapter);
     if target_ir.mtp.is_some() {
         return Err(SurgeryError::Incompatible(
             "the target already has MTP tensors".into(),
@@ -208,7 +126,7 @@ pub fn port_mtp_sidecar(
             "reference MTP depth {depth}; only depth 1 is supported"
         )));
     }
-    let mapped: Vec<String> = TENSOR_MAP
+    let mapped: Vec<String> = tensor_map
         .iter()
         .filter_map(|(s, _, _)| reference_mtp_name(reference_ir, s))
         .collect();
@@ -278,10 +196,19 @@ pub fn port_mtp_sidecar(
     }
 
     // Reference MTP tensors, mapped and transformed.
-    for &(suffix, gguf_suffix, transform) in TENSOR_MAP {
-        let src_name = reference_mtp_name(reference_ir, suffix).ok_or_else(|| {
-            SurgeryError::Incompatible(format!("the reference has no mtp.{suffix}"))
-        })?;
+    for (suffix, gguf_suffix, is_norm) in &tensor_map {
+        let (suffix, gguf_suffix) = (suffix.as_str(), gguf_suffix.as_str());
+        let Some(src_name) = reference_mtp_name(reference_ir, suffix) else {
+            // Q/K norms exist only in architectures that have them: skip when neither side does.
+            if suffix.contains("_norm.")
+                && target_tensor(&format!("blk.{template_layer}.{gguf_suffix}")).is_none()
+            {
+                continue;
+            }
+            return Err(SurgeryError::Incompatible(format!(
+                "the reference has no mtp.{suffix}"
+            )));
+        };
         let src: &TensorInfo = reference.tensor(&src_name).expect("found above");
         let dst_name = format!("blk.{n_layer}.{gguf_suffix}");
 
@@ -310,13 +237,13 @@ pub fn port_mtp_sidecar(
         }
 
         let bytes = reference.tensor_bytes(src)?;
-        let (dtype, data, how) = match (transform, src.dtype) {
-            (Transform::Matrix, DType::Bf16) => (
+        let (dtype, data, how) = match (*is_norm, src.dtype) {
+            (false, DType::Bf16) => (
                 DType::Bf16,
                 Cow::Borrowed(bytes),
                 "copied (BF16)".to_string(),
             ),
-            (Transform::Matrix, other) => {
+            (false, other) => {
                 let mut v = Vec::new();
                 dequantize(other, bytes, &mut v).map_err(|source| SurgeryError::Dequant {
                     name: src_name.clone(),
@@ -328,18 +255,20 @@ pub fn port_mtp_sidecar(
                     .collect();
                 (DType::Bf16, Cow::Owned(b), format!("{other} → BF16"))
             }
-            (Transform::NormPlusOne, other) => {
+            (true, other) => {
                 let mut v = Vec::new();
                 dequantize(other, bytes, &mut v).map_err(|source| SurgeryError::Dequant {
                     name: src_name.clone(),
                     source,
                 })?;
-                let b: Vec<u8> = v.iter().flat_map(|x| (x + 1.0).to_le_bytes()).collect();
-                (
-                    DType::F32,
-                    Cow::Owned(b),
-                    format!("{other} + 1 → F32 (zero-centered RMSNorm)"),
-                )
+                let off = if adapter.norm_offset { 1.0 } else { 0.0 };
+                let b: Vec<u8> = v.iter().flat_map(|x| (x + off).to_le_bytes()).collect();
+                let how = if adapter.norm_offset {
+                    format!("{other} + 1 → F32 (zero-centered RMSNorm)")
+                } else {
+                    format!("{other} → F32")
+                };
+                (DType::F32, Cow::Owned(b), how)
             }
         };
         written.push(WrittenTensor {
