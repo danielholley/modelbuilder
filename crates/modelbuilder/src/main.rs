@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use mb_ir::ModelIr;
 
@@ -168,6 +168,31 @@ enum Command {
 
 #[derive(Subcommand)]
 enum SurgeryOp {
+    /// Remove a contiguous block of layers (depth pruning) and renumber the
+    /// rest. Tensors are copied byte for byte; heal afterwards with a finetune.
+    Prune {
+        target: PathBuf,
+        /// Layers to remove, `start..end` (end exclusive).
+        #[arg(long)]
+        layers: String,
+        #[arg(long, short = 'o')]
+        out: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Enable YaRN RoPE scaling in a GGUF's metadata (context × factor).
+    Yarn {
+        target: PathBuf,
+        #[arg(long)]
+        factor: f32,
+        /// Context the model was trained at (default: from the metadata).
+        #[arg(long)]
+        original_context: Option<u64>,
+        #[arg(long, short = 'o')]
+        out: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
     /// Write trained tensors (HF names, primal basis, e.g. from a QAT stage)
     /// back into a copy of a GGUF, re-rotated and re-encoded to each tensor's
     /// original type. Everything else is copied byte for byte.
@@ -353,6 +378,45 @@ fn main() -> Result<()> {
                 max_rel_error,
             };
             let report = mb_surgery::replace::replace_tensors(&t, &t_ir, &u, &out, &opts)?;
+            print!("{}", render::surgery(&report));
+        }
+        Command::Surgery {
+            op:
+                SurgeryOp::Prune {
+                    target,
+                    layers,
+                    out,
+                    force,
+                },
+        } => {
+            let (a, b) = layers
+                .split_once("..")
+                .context("--layers takes start..end")?;
+            let (a, b): (u32, u32) = (a.parse()?, b.parse()?);
+            if b <= a {
+                bail!("--layers {a}..{b} is empty");
+            }
+            let t = mb_formats::open(&target)
+                .with_context(|| format!("opening {}", target.display()))?;
+            let ir = ModelIr::from_raw(t.raw.clone());
+            let report = mb_surgery::gguf_edit::prune_layers(&t, &ir, a, b - a, &out, force)?;
+            print!("{}", render::surgery(&report));
+        }
+        Command::Surgery {
+            op:
+                SurgeryOp::Yarn {
+                    target,
+                    factor,
+                    original_context,
+                    out,
+                    force,
+                },
+        } => {
+            let t = mb_formats::open(&target)
+                .with_context(|| format!("opening {}", target.display()))?;
+            let ir = ModelIr::from_raw(t.raw.clone());
+            let report =
+                mb_surgery::gguf_edit::set_yarn(&t, &ir, factor, original_context, &out, force)?;
             print!("{}", render::surgery(&report));
         }
         Command::Surgery {

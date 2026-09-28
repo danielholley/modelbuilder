@@ -6,6 +6,7 @@
 
 pub mod arch;
 pub mod export;
+pub mod gguf_edit;
 pub mod hf_export;
 pub mod mtp;
 pub mod replace;

@@ -18,7 +18,7 @@ fn whole_catalog_on_hybrid_ternary() {
     let ctx = Context::new(&ir, None);
     let hw = resolve_hardware(&["1x24GB".into(), "8xH100".into()]).unwrap();
     let p = plan(&ctx, &[], &hw).unwrap();
-    assert_eq!(p.features.len(), 3);
+    assert_eq!(p.features.len(), 8);
 
     // FP4 KV: 2 global layers × 2 × 2 kv heads × 32 dims = 256 elements/token.
     let fp4 = find(&p, "fp4-kv");
@@ -56,6 +56,76 @@ fn whole_catalog_on_hybrid_ternary() {
         st.backprop_params,
         "gradients stop at the head, after flowing through the frozen LM head (vocab 256 × hidden 128)"
     );
+}
+
+#[test]
+fn new_catalog_features_on_hybrid_ternary() {
+    let dir = tempfile::tempdir().unwrap();
+    let ir = load(&mb_fixtures::gguf_hybrid_ternary(dir.path()));
+    let ctx = Context::new(&ir, None);
+    let hw = resolve_hardware(&["1x24GB".into()]).unwrap();
+    let p = plan(&ctx, &[], &hw).unwrap();
+
+    // MLA: 2 KV heads × 32 dims × 2 = 128 cached values; the default rank doesn't shrink that.
+    let mla = find(&p, "mla");
+    assert!(mla
+        .compat
+        .blockers
+        .iter()
+        .any(|b| b.contains("not smaller")));
+    let p2 = plan(
+        &ctx,
+        &[parse_feature_spec("mla:kv_rank=48,rope_dim=16")],
+        &hw,
+    )
+    .unwrap();
+    let e = p2.features[0].estimate.as_ref().unwrap();
+    assert_eq!((e.effects[0].before, e.effects[0].after), (512.0, 256.0));
+
+    // Pruning keeps whole periods of the 3 DeltaNet + 1 attention pattern and the last layer.
+    let prune = find(&p, "prune-layers");
+    assert!(prune.compat.ok(), "{:?}", prune.compat);
+    assert!(
+        prune.surgery[0].contains("layers 3..7"),
+        "{:?}",
+        prune.surgery
+    );
+    let bad = plan(&ctx, &[parse_feature_spec("prune-layers:count=2")], &hw).unwrap();
+    assert!(bad.features[0].compat.blockers[0].contains("period-4"));
+
+    // YaRN: 4× the configured context, one long-context stage.
+    let yarn = find(&p, "yarn");
+    assert!(yarn.compat.ok());
+    let e = yarn.estimate.as_ref().unwrap();
+    assert_eq!(e.effects[0].after, 4.0 * e.effects[0].before);
+    let none = plan(&ctx, &[parse_feature_spec("yarn:finetune=false")], &hw).unwrap();
+    assert!(none.features[0]
+        .estimate
+        .as_ref()
+        .unwrap()
+        .stages
+        .is_empty());
+
+    // MoE upcycling: 8 experts, top-2 over the 8 dense MLPs.
+    let moe = find(&p, "moe-upcycle");
+    assert!(moe.compat.ok());
+    let e = moe.estimate.as_ref().unwrap();
+    assert!(e.effects[0].after > e.effects[1].after && e.effects[1].after > e.effects[1].before);
+
+    // Draft heads: frozen trunk, precomputed features; Medusa carries its own LM heads.
+    let d = find(&p, "draft-head");
+    let st = &d.estimate.as_ref().unwrap().stages[0];
+    assert_eq!(st.trunk, mb_features::TrunkUse::Frozen);
+    assert_eq!(st.backprop_params, st.trainable_params + 256 * 128);
+    let m = plan(
+        &ctx,
+        &[parse_feature_spec("draft-head:kind=medusa,size=2")],
+        &hw,
+    )
+    .unwrap();
+    let st = &m.features[0].estimate.as_ref().unwrap().stages[0];
+    assert_eq!(st.trainable_params, 2 * (128 * 128 + 128 + 256 * 128));
+    assert!(plan(&ctx, &[parse_feature_spec("draft-head:kind=bogus")], &hw).is_err());
 }
 
 #[test]

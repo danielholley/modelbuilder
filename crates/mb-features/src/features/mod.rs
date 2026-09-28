@@ -1,12 +1,26 @@
+mod draft;
 mod fp4_kv;
 mod kv_share;
+mod mla;
+mod moe_upcycle;
 mod mtp;
+mod prune;
+mod yarn;
 
 use mb_ir::{AttentionKind, AttentionSpec, Component, Mixer, ModelIr, TensorKind};
 
 use crate::Feature;
 
-static CATALOG: &[&dyn Feature] = &[&fp4_kv::Fp4Kv, &kv_share::KvShare, &mtp::Mtp];
+static CATALOG: &[&dyn Feature] = &[
+    &fp4_kv::Fp4Kv,
+    &kv_share::KvShare,
+    &mla::Mla,
+    &mtp::Mtp,
+    &draft::DraftHead,
+    &yarn::Yarn,
+    &prune::Prune,
+    &moe_upcycle::MoeUpcycle,
+];
 
 /// Every built-in feature.
 pub fn catalog() -> &'static [&'static dyn Feature] {
