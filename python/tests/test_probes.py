@@ -34,6 +34,7 @@ class Oracle(BaseHTTPRequestHandler):
     """Answers with the code it finds in the prompt, unless the context is 'too long'."""
 
     limit = 3_000  # characters: 2 filler paragraphs pass, 20 do not
+    last_prompt = ""
 
     def log_message(self, *a) -> None:
         pass
@@ -55,6 +56,7 @@ class Oracle(BaseHTTPRequestHandler):
         elif self.path == "/apply-template":
             self._send({"prompt": body["messages"][0]["content"]})
         else:
+            Oracle.last_prompt = body["prompt"]
             m = re.search(r"secret code is (\d+)", body["prompt"])
             forgot = len(body["prompt"]) > self.limit
             self._send({"content": "I don't know" if forgot or not m else m[1]})
@@ -71,6 +73,7 @@ def test_needle_finds_short_and_misses_long():
         httpd.shutdown()
     assert [t.found for t in r.trials] == [True, True, True, False, False, False]
     assert r.accuracy == 0.5
+    assert Oracle.last_prompt.endswith("The secret code is"), "the reply is started for the model"
 
 
 def test_hf_vs_gguf_matches_a_model_against_itself(tmp_path: Path):

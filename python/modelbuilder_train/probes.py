@@ -106,12 +106,17 @@ def needle(
     cache_type_k: str = "f16",
     cache_type_v: str = "f16",
     progress=None,
+    answer_prefix: str = "The secret code is",
 ) -> NeedleResult:
     """Hides ``The secret code is NNNNNN.`` at each depth of each context length and asks for it.
 
     ``server`` is a :class:`modelbuilder_train.server.Server`, started with a
     context of at least ``max(lengths)`` + 64 tokens per slot. Lengths are in
     tokens of the server's own tokenizer; the chat template is applied.
+
+    The reply is started with ``answer_prefix``, so the model continues
+    straight into the number. Otherwise reasoning models spend the token
+    budget on a preamble and every trial reads as a miss.
     """
     rng = random.Random(seed)
     unit = server.tokenize(filler)
@@ -125,7 +130,7 @@ def needle(
             doc.insert(round(d * len(doc)), f"The secret code is {code}. ")
             question = "What is the secret code mentioned in the text? Answer with the number only."
             prompt = server.apply_template([{"role": "user", "content": "".join(doc) + "\n\n" + question}])
-            answer = server.complete(prompt, n_predict=24, temperature=0.0, seed=seed)
+            answer = server.complete(prompt + answer_prefix, n_predict=16, temperature=0.0, seed=seed)
             trial = NeedleTrial(n, d, code in answer, answer.strip()[:80])
             res.trials.append(trial)
             if progress:
