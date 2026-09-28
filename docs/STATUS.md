@@ -112,8 +112,9 @@ live in `docs/runbooks/` and `docs/research/`.
   - a trunk-distill run on GPUs.
 
   Steps are in [`docs/runbooks/verify-export-and-kv-qat.md`](runbooks/verify-export-and-kv-qat.md).
-- **The quantized-KV measurement** on the target (the `probe kv-cache`
-  sweep), to decide whether QAT is needed.
+- **Quantized KV at long context.** At ≤3K tokens a q4_0 cache costs +0.04%
+  perplexity and no retrieval (6/6, the same as f16; see the runbook).
+  16K–262K is still to measure before deciding on QAT.
 - **Runtime for KV sharing**: training works, but no llama.cpp build runs
   reuse layers, and `surgery replace` doesn't drop the reuse layers' K/V.
 - **Surgery for `mla` and `moe-upcycle`**: they are planned only. The outlines

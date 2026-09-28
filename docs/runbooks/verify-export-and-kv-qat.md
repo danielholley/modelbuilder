@@ -44,6 +44,22 @@ python -m modelbuilder_train probe kv-cache --llama-bin <fork>/build/bin --model
 
 If q4_0 costs little perplexity and no retrieval, run it without training.
 
+**Measured 2026-09-28** (CPU, 4 threads, the PrismML fork; `Ternary-Bonsai-2-27B-PQ2_0.gguf`):
+
+| KV cache | Perplexity (wikitext-2, ctx 512, 8 chunks) | Δ vs f16 | Needle retrieval (1024 and 3072 tokens × depths 0.1/0.5/0.9) |
+|---|---|---|---|
+| f16 | 9.005 | — | 6/6 |
+| q8_0 | 9.007 | +0.03% | not re-run |
+| q4_0 | 9.008 | +0.04% | 6/6 |
+
+Up to 3K tokens, a q4_0 cache costs essentially nothing, so QAT isn't
+justified at these lengths. It is still unmeasured at long context (16K–262K),
+where quantization error in the cache accumulates over many more keys. Run
+the command above with `--lengths 16384,65536,262144` on a GPU server
+before deciding. The first sweep scored 0% retrieval everywhere because the
+probe cut a reasoning model off before its answer. The probe now starts the
+reply and allows 64 tokens (`probes.needle`).
+
 ## 3. KV-cache QAT (if needed)
 
 ```sh
