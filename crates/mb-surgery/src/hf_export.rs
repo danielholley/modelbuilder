@@ -164,7 +164,11 @@ fn pruned_layers(ir: &ModelIr) -> Option<(usize, usize)> {
     let mb_ir::Metadata::Gguf { kv, .. } = &ir.raw.metadata else {
         return None;
     };
-    let v = kv.iter().find(|(k, _)| k == "modelbuilder.pruned_layers")?.1.as_str()?;
+    let v = kv
+        .iter()
+        .find(|(k, _)| k == "modelbuilder.pruned_layers")?
+        .1
+        .as_str()?;
     let (a, b) = v.split_once("..")?;
     Some((a.parse().ok()?, b.parse().ok()?))
 }
