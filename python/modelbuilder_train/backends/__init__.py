@@ -23,7 +23,15 @@ def run_torch(spec: JobSpec, spec_dir: Path, ev: EventWriter) -> dict[str, str]:
     outputs: dict[str, str] = {}
     for stage in spec.stages:
         ev.stage = stage.name
-        if stage.kind == "mtp_align":
+        if stage.kind == "trunk_distill":
+            from modelbuilder_train.hf.distill import run_trunk_distill
+
+            outputs.update(
+                run_trunk_distill(
+                    stage.trunk_distill, stage.hyper, lambda p: resolve(spec_dir, p), out_dir, device, ev, spec.job_id
+                )
+            )
+        elif stage.kind == "mtp_align":
             outputs.update(
                 run_mtp_align(
                     stage.mtp_align, stage.hyper, lambda p: resolve(spec_dir, p), out_dir, device, ev, spec.job_id

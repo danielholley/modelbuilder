@@ -38,16 +38,29 @@ class MtpAlign(_Strict):
     eval_fraction: float = Field(default=0.05, ge=0, le=0.5)
 
 
+class TrunkDistill(_Strict):
+    model: str
+    texts: str
+    trainable: list[str] = Field(min_length=1)
+    kv_format: Literal["q8_0", "q4_0", "nvfp4"] | None = None
+    kv_share_group: int | None = Field(default=None, ge=2)
+    weight_fakequant: bool = True
+    eval_fraction: float = Field(default=0.05, ge=0, le=0.5)
+
+
 class Stage(_Strict):
     name: str = Field(min_length=1)
-    kind: Literal["mtp_align"]
+    kind: Literal["mtp_align", "trunk_distill"]
     mtp_align: MtpAlign | None = None
+    trunk_distill: TrunkDistill | None = None
     hyper: Hyper
 
     @model_validator(mode="after")
     def _kind_payload(self) -> Stage:
         if self.kind == "mtp_align" and self.mtp_align is None:
             raise ValueError("kind mtp_align requires an mtp_align table")
+        if self.kind == "trunk_distill" and self.trunk_distill is None:
+            raise ValueError("kind trunk_distill requires a trunk_distill table")
         return self
 
 

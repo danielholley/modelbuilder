@@ -69,6 +69,7 @@ pub enum Device {
 #[serde(rename_all = "snake_case")]
 pub enum StageKind {
     MtpAlign,
+    TrunkDistill,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -79,6 +80,8 @@ pub struct Stage {
     pub kind: StageKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtp_align: Option<MtpAlign>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trunk_distill: Option<TrunkDistill>,
     pub hyper: Hyper,
 }
 
@@ -95,6 +98,43 @@ pub struct MtpAlign {
     pub features: String,
     #[serde(default = "default_eval_fraction")]
     pub eval_fraction: f64,
+}
+
+/// KV-cache formats the `trunk_distill` stage can fake-quantize to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum KvFormat {
+    #[serde(rename = "q8_0")]
+    Q8_0,
+    #[serde(rename = "q4_0")]
+    Q4_0,
+    #[serde(rename = "nvfp4")]
+    Nvfp4,
+}
+
+/// Retrains some trunk tensors of an HF checkpoint so the modified model
+/// (quantized or shared KV cache, fake-quantized weights) matches the original.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct TrunkDistill {
+    pub model: String,
+    pub texts: String,
+    /// Substrings of the HF parameter names to train.
+    pub trainable: Vec<String>,
+    #[serde(default)]
+    pub kv_format: Option<KvFormat>,
+    #[serde(default)]
+    pub kv_share_group: Option<u32>,
+    #[serde(default = "default_true")]
+    pub weight_fakequant: bool,
+    #[serde(default = "default_eval_fraction")]
+    pub eval_fraction: f64,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_eval_fraction() -> f64 {
@@ -183,6 +223,29 @@ impl JobSpec {
                         "stage {}: eval_fraction must be in [0, 0.5]",
                         s.name
                     ))
+                }
+                _ => {}
+            }
+            match (s.kind, &s.trunk_distill) {
+                (StageKind::TrunkDistill, None) => {
+                    return bad(format!(
+                        "stage {}: kind trunk_distill needs a trunk_distill table",
+                        s.name
+                    ))
+                }
+                (StageKind::TrunkDistill, Some(t)) => {
+                    if t.trainable.is_empty() {
+                        return bad(format!("stage {}: trainable is empty", s.name));
+                    }
+                    if t.kv_share_group.is_some_and(|g| g < 2) {
+                        return bad(format!("stage {}: kv_share_group must be >= 2", s.name));
+                    }
+                    if !(0.0..=0.5).contains(&t.eval_fraction) {
+                        return bad(format!(
+                            "stage {}: eval_fraction must be in [0, 0.5]",
+                            s.name
+                        ));
+                    }
                 }
                 _ => {}
             }
@@ -441,6 +504,71 @@ pub fn mtp_align_spec(i: MtpAlignInputs) -> JobSpec {
                 embedding_tensor: i.embedding_tensor,
                 lm_head_tensor: i.lm_head_tensor,
                 features: s(&i.features),
+                eval_fraction: 0.05,
+            }),
+            trunk_distill: None,
+            hyper: i.hyper,
+        }],
+    }
+}
+
+/// Inputs for a `trunk_distill` job.
+#[derive(Clone, Debug)]
+pub struct TrunkDistillInputs {
+    pub job_id: String,
+    pub stage_name: String,
+    pub output_dir: PathBuf,
+    pub model: PathBuf,
+    pub texts: PathBuf,
+    pub trainable: Vec<String>,
+    pub kv_format: Option<KvFormat>,
+    pub kv_share_group: Option<u32>,
+    pub weight_fakequant: bool,
+    pub hardware_profile: Option<String>,
+    pub device: Device,
+    pub hyper: Hyper,
+}
+
+impl Hyper {
+    /// Defaults for distilling a few trunk tensors: low LR, short warmup.
+    pub fn trunk_distill_default() -> Self {
+        Self {
+            lr: 2e-5,
+            steps: 1000,
+            seq_len: 2048,
+            batch_seqs: 4,
+            warmup_steps: 50,
+            weight_decay: 0.0,
+            grad_clip: Some(1.0),
+            log_every: 10,
+            eval_every: 100,
+            seed: 0,
+            dtype: TrainDtype::Bfloat16,
+        }
+    }
+}
+
+pub fn trunk_distill_spec(i: TrunkDistillInputs) -> JobSpec {
+    let s = |p: &Path| p.display().to_string();
+    JobSpec {
+        schema_version: SCHEMA_VERSION,
+        job_id: i.job_id,
+        created_by: Some(format!("modelbuilder {}", env!("CARGO_PKG_VERSION"))),
+        backend: Backend::Torch,
+        device: i.device,
+        hardware_profile: i.hardware_profile,
+        output_dir: s(&i.output_dir),
+        stages: vec![Stage {
+            name: i.stage_name,
+            kind: StageKind::TrunkDistill,
+            mtp_align: None,
+            trunk_distill: Some(TrunkDistill {
+                model: s(&i.model),
+                texts: s(&i.texts),
+                trainable: i.trainable,
+                kv_format: i.kv_format,
+                kv_share_group: i.kv_share_group,
+                weight_fakequant: i.weight_fakequant,
                 eval_fraction: 0.05,
             }),
             hyper: i.hyper,

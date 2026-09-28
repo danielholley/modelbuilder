@@ -140,6 +140,11 @@ impl WeightRotation {
         })
     }
 
+    /// The ±1 sign vector for rows of this input width (explicit sign mode).
+    pub fn signs(&self, width: u64) -> Option<&[f32]> {
+        self.signs.get(&width).map(Vec::as_slice)
+    }
+
     /// Whether a tensor is stored in the rotated basis (forward or inverse).
     pub fn is_rotated(&self, name: &str) -> bool {
         self.weight_names.contains(name) || self.inverse_names.contains(name)

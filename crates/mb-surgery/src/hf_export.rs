@@ -335,6 +335,39 @@ fn write_all(
     written.push(out_dir.join("model.safetensors.index.json"));
     write_json(&out_dir.join("model.safetensors.index.json"), &index)?;
 
+    // How each tensor is stored in the source, so training can fake-quantize
+    // to exactly that format (and `surgery replace` can re-encode losslessly).
+    let mut qt = serde_json::Map::new();
+    for m in &mapped {
+        qt.insert(
+            m.map.hf_name.clone(),
+            json!({
+                "gguf": m.src.name,
+                "dtype": m.src.dtype.to_string(),
+                "rotated": m.rotated,
+                "rows_reordered": m.map.rows.is_some(),
+                "cols_reordered": m.map.cols.is_some(),
+            }),
+        );
+    }
+    let rot_json = rotation.map(|r| {
+        let signs: serde_json::Map<String, Value> = r
+            .sign_widths
+            .iter()
+            .filter_map(|w| r.signs(*w).map(|s| (w.to_string(), json!(s))))
+            .collect();
+        json!({ "scheme": r.scheme, "block_size": r.block_size, "sign_mode": r.sign_mode, "signs": signs })
+    });
+    let quant = json!({
+        "format": "modelbuilder.source-quantization",
+        "version": 1,
+        "source": ir.raw.root.display().to_string(),
+        "tensors": qt,
+        "rotation": rot_json,
+    });
+    written.push(out_dir.join("modelbuilder_quantization.json"));
+    write_json(&out_dir.join("modelbuilder_quantization.json"), &quant)?;
+
     // A text-only config for the adapter's causal-LM class, from the reference's (text) config.
     let mut cfg = t.clone();
     let tied = !mapped.iter().any(|m| m.map.hf_name == "lm_head.weight") && opts.globals;

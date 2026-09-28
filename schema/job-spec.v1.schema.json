@@ -5,63 +5,281 @@
   "description": "Written by the Rust side (mb-jobs), read by the Python side (modelbuilder_train). Paths are absolute or relative to the spec file.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "job_id", "backend", "device", "output_dir", "stages"],
+  "required": [
+    "schema_version",
+    "job_id",
+    "backend",
+    "device",
+    "output_dir",
+    "stages"
+  ],
   "properties": {
-    "schema_version": { "const": 1 },
-    "job_id": { "type": "string", "minLength": 1 },
-    "created_by": { "type": "string" },
-    "backend": { "enum": ["torch"] },
-    "device": { "enum": ["auto", "cpu", "cuda", "mps"] },
-    "hardware_profile": { "type": ["string", "null"] },
-    "output_dir": { "type": "string", "minLength": 1 },
-    "stages": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/stage" } }
+    "schema_version": {
+      "const": 1
+    },
+    "job_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "created_by": {
+      "type": "string"
+    },
+    "backend": {
+      "enum": [
+        "torch"
+      ]
+    },
+    "device": {
+      "enum": [
+        "auto",
+        "cpu",
+        "cuda",
+        "mps"
+      ]
+    },
+    "hardware_profile": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "output_dir": {
+      "type": "string",
+      "minLength": 1
+    },
+    "stages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/stage"
+      }
+    }
   },
   "$defs": {
     "stage": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "kind", "hyper"],
+      "required": [
+        "name",
+        "kind",
+        "hyper"
+      ],
       "properties": {
-        "name": { "type": "string", "minLength": 1 },
-        "kind": { "enum": ["mtp_align"] },
-        "mtp_align": { "$ref": "#/$defs/mtp_align" },
-        "hyper": { "$ref": "#/$defs/hyper" }
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "mtp_align",
+            "trunk_distill"
+          ]
+        },
+        "mtp_align": {
+          "$ref": "#/$defs/mtp_align"
+        },
+        "hyper": {
+          "$ref": "#/$defs/hyper"
+        },
+        "trunk_distill": {
+          "$ref": "#/$defs/trunk_distill"
+        }
       },
       "allOf": [
-        { "if": { "properties": { "kind": { "const": "mtp_align" } } }, "then": { "required": ["mtp_align"] } }
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "mtp_align"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "mtp_align"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "trunk_distill"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "trunk_distill"
+            ]
+          }
+        }
       ]
     },
     "mtp_align": {
       "description": "Train an MTP head against a frozen trunk from precomputed trunk hidden states.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["reference_config", "frozen_tensors", "embedding_tensor", "lm_head_tensor", "features"],
+      "required": [
+        "reference_config",
+        "frozen_tensors",
+        "embedding_tensor",
+        "lm_head_tensor",
+        "features"
+      ],
       "properties": {
-        "reference_config": { "type": "string", "description": "HF config.json giving the head's shapes (e.g. the base model the head is ported from)." },
-        "init_head": { "type": ["string", "null"], "description": "Directory or file with mtp.* tensors to start from; null for random init." },
-        "frozen_tensors": { "type": "string", "description": "safetensors with the target's token embedding and output head in the primal basis (modelbuilder export-tensors)." },
-        "embedding_tensor": { "type": "string" },
-        "lm_head_tensor": { "type": "string" },
-        "features": { "type": "string", "description": "Feature directory (manifest.json + shards) from modelbuilder_train extract-features." },
-        "eval_fraction": { "type": "number", "minimum": 0, "maximum": 0.5, "default": 0.05 }
+        "reference_config": {
+          "type": "string",
+          "description": "HF config.json giving the head's shapes (e.g. the base model the head is ported from)."
+        },
+        "init_head": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Directory or file with mtp.* tensors to start from; null for random init."
+        },
+        "frozen_tensors": {
+          "type": "string",
+          "description": "safetensors with the target's token embedding and output head in the primal basis (modelbuilder export-tensors)."
+        },
+        "embedding_tensor": {
+          "type": "string"
+        },
+        "lm_head_tensor": {
+          "type": "string"
+        },
+        "features": {
+          "type": "string",
+          "description": "Feature directory (manifest.json + shards) from modelbuilder_train extract-features."
+        },
+        "eval_fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 0.5,
+          "default": 0.05
+        }
       }
     },
     "hyper": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["lr", "steps", "seq_len", "batch_seqs"],
+      "required": [
+        "lr",
+        "steps",
+        "seq_len",
+        "batch_seqs"
+      ],
       "properties": {
-        "lr": { "type": "number", "exclusiveMinimum": 0 },
-        "steps": { "type": "integer", "minimum": 1 },
-        "seq_len": { "type": "integer", "minimum": 4 },
-        "batch_seqs": { "type": "integer", "minimum": 1 },
-        "warmup_steps": { "type": "integer", "minimum": 0, "default": 0 },
-        "weight_decay": { "type": "number", "minimum": 0, "default": 0.0 },
-        "grad_clip": { "type": ["number", "null"], "default": 1.0 },
-        "log_every": { "type": "integer", "minimum": 1, "default": 10 },
-        "eval_every": { "type": "integer", "minimum": 1, "default": 100 },
-        "seed": { "type": "integer", "default": 0 },
-        "dtype": { "enum": ["float32", "bfloat16"], "default": "float32" }
+        "lr": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "steps": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "seq_len": {
+          "type": "integer",
+          "minimum": 4
+        },
+        "batch_seqs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "warmup_steps": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "weight_decay": {
+          "type": "number",
+          "minimum": 0,
+          "default": 0.0
+        },
+        "grad_clip": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": 1.0
+        },
+        "log_every": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 10
+        },
+        "eval_every": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 100
+        },
+        "seed": {
+          "type": "integer",
+          "default": 0
+        },
+        "dtype": {
+          "enum": [
+            "float32",
+            "bfloat16"
+          ],
+          "default": "float32"
+        }
+      }
+    },
+    "trunk_distill": {
+      "description": "Retrain selected trunk tensors so a modified model (quantized KV cache, shared KV, fake-quantized weights) matches the original, by KL on next-token distributions.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "texts",
+        "trainable"
+      ],
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "HF model directory, e.g. from modelbuilder export-hf (with modelbuilder_quantization.json for weight fake-quantization)."
+        },
+        "texts": {
+          "type": "string",
+          "description": "JSONL with {\"text\": ...} or {\"tokens\": [...]} per line."
+        },
+        "trainable": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          },
+          "description": "Parameter-name substrings to train, e.g. self_attn.k_proj.weight."
+        },
+        "kv_format": {
+          "enum": [
+            "q8_0",
+            "q4_0",
+            "nvfp4",
+            null
+          ],
+          "description": "Fake-quantize the KV cache to this format."
+        },
+        "kv_share_group": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 2,
+          "description": "Share K/V across groups of this many consecutive attention layers."
+        },
+        "weight_fakequant": {
+          "type": "boolean",
+          "default": true
+        },
+        "eval_fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 0.5,
+          "default": 0.05
+        }
       }
     }
   }
