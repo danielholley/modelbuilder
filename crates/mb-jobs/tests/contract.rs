@@ -2,20 +2,63 @@
 
 use std::path::{Path, PathBuf};
 
-use mb_jobs::{mtp_align_spec, Device, EventRecord, Hyper, JobSpec, MtpAlignInputs};
+use mb_jobs::{
+    mtp_align_spec, trunk_distill_spec, Device, EventRecord, Hyper, JobSpec, KvFormat,
+    MtpAlignInputs, TrunkDistillInputs,
+};
 
 fn schema_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schema")
 }
 
 #[test]
-fn example_spec_round_trips() {
-    let text = std::fs::read_to_string(schema_dir().join("examples/mtp-align.job.json")).unwrap();
-    let spec: JobSpec = serde_json::from_str(&text).unwrap();
+fn example_specs_round_trip() {
+    for name in ["mtp-align.job.json", "trunk-distill.job.json"] {
+        let text = std::fs::read_to_string(schema_dir().join("examples").join(name)).unwrap();
+        let spec: JobSpec = serde_json::from_str(&text).unwrap();
+        spec.validate().unwrap();
+        let a: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let b = serde_json::to_value(&spec).unwrap();
+        assert_eq!(
+            a, b,
+            "{name}: serializing must reproduce the example exactly"
+        );
+    }
+}
+
+#[test]
+fn trunk_distill_builder_matches_the_example_shape() {
+    let spec = trunk_distill_spec(TrunkDistillInputs {
+        job_id: "j".into(),
+        stage_name: "kv-qat".into(),
+        output_dir: "out".into(),
+        model: "hf".into(),
+        texts: "t.jsonl".into(),
+        trainable: vec!["k_proj".into()],
+        kv_format: Some(KvFormat::Q4_0),
+        kv_share_group: None,
+        weight_fakequant: true,
+        hardware_profile: None,
+        device: Device::Auto,
+        hyper: Hyper::trunk_distill_default(),
+    });
     spec.validate().unwrap();
-    let a: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let b = serde_json::to_value(&spec).unwrap();
-    assert_eq!(a, b, "serializing must reproduce the example exactly");
+    let example: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(schema_dir().join("examples/trunk-distill.job.json")).unwrap(),
+    )
+    .unwrap();
+    let ours = serde_json::to_value(&spec).unwrap();
+    let keys = |v: &serde_json::Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+    assert_eq!(
+        keys(&ours["stages"][0]["trunk_distill"]),
+        keys(&example["stages"][0]["trunk_distill"])
+    );
+    let mut bad = spec.clone();
+    bad.stages[0].trunk_distill.as_mut().unwrap().kv_share_group = Some(1);
+    assert!(bad.validate().is_err());
+    let mut bad = spec;
+    bad.stages[0].trunk_distill = None;
+    assert!(bad.validate().is_err());
 }
 
 #[test]

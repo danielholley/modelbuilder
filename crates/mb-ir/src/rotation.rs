@@ -1,6 +1,6 @@
 //! Orthogonal rotations folded into stored weights.
 //!
-//! PrismML's Bonsai 2 checkpoints store every foldable weight in a blockwise
+//! PrismML's quantized checkpoints store every foldable weight in a blockwise
 //! Hadamard basis. The runtime (PrismML-Eng/llama.cpp, `build_lora_mm` in
 //! `src/llama-graph.cpp`) computes
 //!
@@ -140,6 +140,11 @@ impl WeightRotation {
         })
     }
 
+    /// The ±1 sign vector for rows of this input width (explicit sign mode).
+    pub fn signs(&self, width: u64) -> Option<&[f32]> {
+        self.signs.get(&width).map(Vec::as_slice)
+    }
+
     /// Whether a tensor is stored in the rotated basis (forward or inverse).
     pub fn is_rotated(&self, name: &str) -> bool {
         self.weight_names.contains(name) || self.inverse_names.contains(name)
@@ -180,6 +185,44 @@ impl WeightRotation {
             for (x, s) in row.iter_mut().zip(s) {
                 *x *= s;
             }
+        }
+        Ok(())
+    }
+
+    /// The inverse of [`Self::to_primal`]: a primal row back to the stored
+    /// basis, `w_stored = H · (s ⊙ w)` (H is symmetric and orthogonal, and
+    /// `s ⊙ s = 1`). New or retrained weights go through this before they are
+    /// re-quantized, so they stay in the checkpoint's rotated basis.
+    pub fn from_primal(&self, name: &str, row: &mut [f32]) -> Result<(), RotationError> {
+        if !self.is_rotated(name) {
+            return Err(RotationError::NotRotated(name.to_string()));
+        }
+        let block = self
+            .block_size
+            .ok_or_else(|| RotationError::Metadata("missing block_size".into()))?
+            as usize;
+        if block == 0 || !block.is_power_of_two() {
+            return Err(RotationError::Metadata(format!(
+                "block size {block} is not a power of two"
+            )));
+        }
+        if row.len() % block != 0 {
+            return Err(RotationError::BadLength {
+                len: row.len(),
+                block,
+            });
+        }
+        if self.sign_mode == SignMode::Explicit {
+            let s = self
+                .signs
+                .get(&(row.len() as u64))
+                .ok_or(RotationError::NoSigns(row.len()))?;
+            for (x, s) in row.iter_mut().zip(s) {
+                *x *= s;
+            }
+        }
+        for chunk in row.chunks_exact_mut(block) {
+            fwht_normalized(chunk);
         }
         Ok(())
     }
@@ -306,8 +349,14 @@ mod tests {
         let primal: f32 = w.iter().zip(&x).map(|(a, b)| a * b).sum();
         assert!((runtime - primal).abs() < 1e-5);
 
+        let folded = stored.clone();
         rot.to_primal("blk.0.attn_q.weight", &mut stored).unwrap();
         for (a, b) in stored.iter().zip(&w) {
+            assert!((a - b).abs() < 1e-5);
+        }
+        // And from_primal folds it back.
+        rot.from_primal("blk.0.attn_q.weight", &mut stored).unwrap();
+        for (a, b) in stored.iter().zip(&folded) {
             assert!((a - b).abs() < 1e-5);
         }
     }

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use mb_ir::ModelIr;
 
@@ -63,7 +63,7 @@ enum Command {
         #[arg(long)]
         recipe: Option<PathBuf>,
         /// Feature spec, `id` or `id:key=value,...` (repeatable), e.g.
-        /// `kv-share:group=2` or `mtp:from=models/Qwen3.8-27B`.
+        /// `kv-share:group=2` or `mtp:from=models/base-model`.
         #[arg(long = "feature", short = 'f')]
         features: Vec<String>,
         /// Hardware profiles (comma-separated); default: all.
@@ -90,12 +90,12 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Export a qwen35 GGUF (e.g. Ternary-Bonsai-2-27B) as a Hugging Face
-    /// checkpoint for PyTorch: decoded, un-rotated, with the converter's
-    /// tensor transforms undone. Needs the reference HF model's config.json.
+    /// Export a GGUF as a Hugging Face checkpoint for PyTorch: decoded,
+    /// un-rotated, with llama.cpp's converter transforms undone (architecture
+    /// adapters: llama, qwen2, qwen3, qwen35). Needs a reference HF config.json.
     ExportHf {
         model: PathBuf,
-        /// Reference HF model directory (config.json, tokenizer), e.g. Qwen3.8-27B.
+        /// Reference HF model directory (config.json, tokenizer) with the same architecture.
         #[arg(long)]
         reference: PathBuf,
         #[arg(long, short = 'o')]
@@ -168,13 +168,58 @@ enum Command {
 
 #[derive(Subcommand)]
 enum SurgeryOp {
-    /// Port an MTP head from a Hugging Face reference model into an MTP-only
-    /// GGUF sidecar for a qwen35 GGUF target (run it with `-md <sidecar>
-    /// --spec-type draft-mtp` in the PrismML llama.cpp fork).
-    Mtp {
-        /// Target model (.gguf), e.g. Ternary-Bonsai-2-27B-PQ2_0.gguf.
+    /// Remove a contiguous block of layers (depth pruning) and renumber the
+    /// rest. Tensors are copied byte for byte; heal afterwards with a finetune.
+    Prune {
         target: PathBuf,
-        /// Reference HF model directory with `mtp.*` tensors, e.g. Qwen3.8-27B.
+        /// Layers to remove, `start..end` (end exclusive).
+        #[arg(long)]
+        layers: String,
+        #[arg(long, short = 'o')]
+        out: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Enable YaRN RoPE scaling in a GGUF's metadata (context × factor).
+    Yarn {
+        target: PathBuf,
+        #[arg(long)]
+        factor: f32,
+        /// Context the model was trained at (default: from the metadata).
+        #[arg(long)]
+        original_context: Option<u64>,
+        #[arg(long, short = 'o')]
+        out: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Write trained tensors (HF names, primal basis, e.g. from a QAT stage)
+    /// back into a copy of a GGUF, re-rotated and re-encoded to each tensor's
+    /// original type. Everything else is copied byte for byte.
+    Replace {
+        /// The GGUF to start from.
+        target: PathBuf,
+        /// HF-layout directory with the updated tensors (and a config.json).
+        #[arg(long)]
+        updates: PathBuf,
+        #[arg(long, short = 'o')]
+        out: PathBuf,
+        /// Architecture config (default: the updates directory's config.json).
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Refuse if any tensor's re-quantization error exceeds this (relative RMS, e.g. 0.01).
+        #[arg(long)]
+        max_rel_error: Option<f64>,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Port an MTP head from a Hugging Face reference model into an MTP-only
+    /// GGUF sidecar for a GGUF target whose architecture llama.cpp runs with
+    /// nextn layers (run it with `-md <sidecar> --spec-type draft-mtp`).
+    Mtp {
+        /// Target model (.gguf).
+        target: PathBuf,
+        /// Reference HF model directory with `mtp.*` tensors (e.g. the target's base model).
         #[arg(long)]
         from: PathBuf,
         /// Output sidecar path. Put "mtp" in the name so the fork can find it next to the model.
@@ -195,8 +240,9 @@ enum FixtureKind {
     QwenHybrid,
     DeepseekMlaMoe,
     GgufMixedQuant,
-    GgufBonsaiLike,
-    QwenHybridMatchingBonsaiLike,
+    GgufHybridTernary,
+    HybridMtpReference,
+    GgufLlama,
 }
 
 fn main() -> Result<()> {
@@ -309,6 +355,69 @@ fn main() -> Result<()> {
             for p in mb_features::hardware::profiles() {
                 println!("  {:<13} {}", p.id, p.description);
             }
+        }
+        Command::Surgery {
+            op:
+                SurgeryOp::Replace {
+                    target,
+                    updates,
+                    out,
+                    config,
+                    max_rel_error,
+                    force,
+                },
+        } => {
+            let t = mb_formats::open(&target)
+                .with_context(|| format!("opening {}", target.display()))?;
+            let t_ir = ModelIr::from_raw(t.raw.clone());
+            let u = mb_formats::open(&updates)
+                .with_context(|| format!("opening {}", updates.display()))?;
+            let opts = mb_surgery::replace::ReplaceOptions {
+                config: config.unwrap_or_else(|| updates.join("config.json")),
+                overwrite: force,
+                max_rel_error,
+            };
+            let report = mb_surgery::replace::replace_tensors(&t, &t_ir, &u, &out, &opts)?;
+            print!("{}", render::surgery(&report));
+        }
+        Command::Surgery {
+            op:
+                SurgeryOp::Prune {
+                    target,
+                    layers,
+                    out,
+                    force,
+                },
+        } => {
+            let (a, b) = layers
+                .split_once("..")
+                .context("--layers takes start..end")?;
+            let (a, b): (u32, u32) = (a.parse()?, b.parse()?);
+            if b <= a {
+                bail!("--layers {a}..{b} is empty");
+            }
+            let t = mb_formats::open(&target)
+                .with_context(|| format!("opening {}", target.display()))?;
+            let ir = ModelIr::from_raw(t.raw.clone());
+            let report = mb_surgery::gguf_edit::prune_layers(&t, &ir, a, b - a, &out, force)?;
+            print!("{}", render::surgery(&report));
+        }
+        Command::Surgery {
+            op:
+                SurgeryOp::Yarn {
+                    target,
+                    factor,
+                    original_context,
+                    out,
+                    force,
+                },
+        } => {
+            let t = mb_formats::open(&target)
+                .with_context(|| format!("opening {}", target.display()))?;
+            let ir = ModelIr::from_raw(t.raw.clone());
+            let report =
+                mb_surgery::gguf_edit::set_yarn(&t, &ir, factor, original_context, &out, force)?;
+            print!("{}", render::surgery(&report));
         }
         Command::Surgery {
             op:
@@ -459,10 +568,9 @@ fn main() -> Result<()> {
                 FixtureKind::QwenHybrid => mb_fixtures::qwen_hybrid(&out),
                 FixtureKind::DeepseekMlaMoe => mb_fixtures::deepseek_mla_moe(&out),
                 FixtureKind::GgufMixedQuant => mb_fixtures::gguf_mixed_quant(&out),
-                FixtureKind::GgufBonsaiLike => mb_fixtures::gguf_bonsai_like(&out),
-                FixtureKind::QwenHybridMatchingBonsaiLike => {
-                    mb_fixtures::qwen_hybrid_matching_bonsai_like(&out)
-                }
+                FixtureKind::GgufHybridTernary => mb_fixtures::gguf_hybrid_ternary(&out),
+                FixtureKind::GgufLlama => mb_fixtures::gguf_llama(&out),
+                FixtureKind::HybridMtpReference => mb_fixtures::hybrid_mtp_reference(&out),
             };
             println!("{}", path.display());
         }

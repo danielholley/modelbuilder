@@ -10,6 +10,8 @@ dependencies = ["pydantic>=2", "numpy", "safetensors"]
 # PyTorch is heavy: install it for your platform (CUDA, ROCm, CPU or MPS) as described
 # at https://pytorch.org, or use this extra for the default build.
 torch = ["torch>=2.2"]
+# The `trunk_distill` stage and HF probes (attention interface, `dtype=` loading).
+hf = ["transformers>=4.56", "safetensors"]
 dev = ["pytest", "ruff", "jsonschema"]
 
 [project.scripts]

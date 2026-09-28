@@ -56,10 +56,16 @@ fn data(name: &str, dtype: DType, shape: &[u64]) -> Vec<u8> {
             .collect(),
         // Valid blocks with a sane fp16 scale, so decoders and statistics see
         // realistic values. PQ2_0 uses only the ternary codes 0..=2.
+        // As llama.cpp's reference quantizer writes them: d = amax / 127, so
+        // the largest code in each block is ±127.
         DType::Ggml(GgmlType(8)) => (0..n / 32)
             .flat_map(|_| {
                 let mut b = f32_to_f16(0.01).to_le_bytes().to_vec();
-                b.extend((0..32).map(|_| (rng.next_f32() * 6000.0) as i8 as u8));
+                let mut codes: Vec<i8> = (0..32)
+                    .map(|_| (rng.next_f32() * 6000.0).clamp(-127.0, 127.0) as i8)
+                    .collect();
+                codes[0] = if rng.next_f32() < 0.0 { -127 } else { 127 };
+                b.extend(codes.into_iter().map(|c| c as u8));
                 b
             })
             .collect(),
@@ -248,16 +254,16 @@ pub fn llama_gqa(dir: &Path) -> PathBuf {
     out
 }
 
-/// Qwen3.8-like hybrid model (HF `qwen3_5` layout and tensor names), scaled down: 8 layers in the pattern
+/// A hybrid model in the HF `qwen3_5` layout and tensor names, scaled down: 8 layers in the pattern
 /// 3 × Gated DeltaNet + 1 × gated full attention (GQA), an MTP module, and a
 /// vision tower, nested under `text_config`, written as 2 shards.
 pub fn qwen_hybrid(dir: &Path) -> PathBuf {
     qwen_hybrid_with(dir, (64, 6, 2, 16, 160, 320), (2, 6, 8, 8, 4))
 }
 
-/// The same HF layout with the dimensions of [`gguf_bonsai_like`], so an MTP
-/// head can be ported from one to the other (the Qwen3.8 → Bonsai 2 case).
-pub fn qwen_hybrid_matching_bonsai_like(dir: &Path) -> PathBuf {
+/// The same HF layout with the dimensions of [`gguf_hybrid_ternary`], so an MTP
+/// head can be ported from one to the other (a base model and its quantized derivative).
+pub fn hybrid_mtp_reference(dir: &Path) -> PathBuf {
     qwen_hybrid_with(dir, (128, 4, 2, 32, 256, 256), (2, 4, 32, 32, 4))
 }
 
@@ -324,7 +330,7 @@ fn qwen_hybrid_with(
             .add(format!("{a}.k_norm.weight"), BF16, &[hd]);
         } else {
             let a = format!("{p}.linear_attn");
-            // Split projections, as in the released Qwen3.8-27B checkpoint.
+            // Split projections, as in released `qwen3_5` checkpoints.
             let conv_dim = 2 * lk_heads * lk_dim + lv_heads * lv_dim;
             b.add(format!("{a}.in_proj_qkv.weight"), BF16, &[conv_dim, hidden])
                 .add(
@@ -566,11 +572,10 @@ pub fn gguf_mixed_quant(dir: &Path) -> PathBuf {
     path
 }
 
-/// Bonsai-2-like GGUF: llama.cpp `qwen35` layout (3 × gated DeltaNet + 1 ×
+/// A hybrid ternary GGUF: llama.cpp `qwen35` layout (3 × gated DeltaNet + 1 ×
 /// gated GQA, repeated), ternary `PQ2_0` weights, bf16/f32 recurrent-state
-/// tensors, and PrismML Hadamard-rotation metadata. No MTP tensors, matching
-/// the released Ternary-Bonsai-2-27B files.
-pub fn gguf_bonsai_like(dir: &Path) -> PathBuf {
+/// tensors, and PrismML Hadamard-rotation metadata. No MTP tensors.
+pub fn gguf_hybrid_ternary(dir: &Path) -> PathBuf {
     // PQ2_0 blocks are 128 weights along the input dimension, so every input
     // width here is a multiple of 128.
     let (hidden, heads, kv, hd, inter, vocab) = (128u64, 4u64, 2u64, 32u64, 256u64, 256u64);
@@ -640,7 +645,7 @@ pub fn gguf_bonsai_like(dir: &Path) -> PathBuf {
     };
     let kv_pairs = vec![
         ("general.architecture".to_string(), s("qwen35")),
-        ("general.name".to_string(), s("Tiny Bonsai-like")),
+        ("general.name".to_string(), s("Tiny hybrid ternary")),
         ("qwen35.block_count".to_string(), u32v(8)),
         ("qwen35.context_length".to_string(), u32v(262144)),
         ("qwen35.embedding_length".to_string(), u32v(hidden)),
@@ -673,7 +678,81 @@ pub fn gguf_bonsai_like(dir: &Path) -> PathBuf {
         ("general.file_type".to_string(), u32v(141)),
     ];
     std::fs::create_dir_all(dir).unwrap();
-    let path = dir.join("tiny-bonsai-like.gguf");
+    let path = dir.join("tiny-hybrid-ternary.gguf");
     gguf::write(&path, &kv_pairs, &b.materialize()).unwrap();
+    path
+}
+
+/// A dense `llama` GGUF (F16 embedding, Q8_0 weights, F32 norms, untied
+/// head) with its HF `config.json` beside it, as llama.cpp's converter would
+/// have produced from a Llama checkpoint. For architecture-adapter tests
+/// (e.g. the Q/K RoPE permutation).
+pub fn gguf_llama(dir: &Path) -> PathBuf {
+    let (hidden, heads, kv, hd, inter, vocab, layers) =
+        (64u64, 4u64, 2u64, 16u64, 128u64, 96u64, 2u64);
+    let q8 = DType::Ggml(GgmlType(8));
+    let mut b = Builder::default();
+    b.add("token_embd.weight", DType::F16, &[vocab, hidden]);
+    for l in 0..layers {
+        let p = format!("blk.{l}");
+        b.add(format!("{p}.attn_norm.weight"), F32, &[hidden])
+            .add(format!("{p}.attn_q.weight"), q8, &[heads * hd, hidden])
+            .add(format!("{p}.attn_k.weight"), q8, &[kv * hd, hidden])
+            .add(format!("{p}.attn_v.weight"), q8, &[kv * hd, hidden])
+            .add(format!("{p}.attn_output.weight"), q8, &[hidden, heads * hd])
+            .add(format!("{p}.ffn_norm.weight"), F32, &[hidden])
+            .add(format!("{p}.ffn_gate.weight"), q8, &[inter, hidden])
+            .add(format!("{p}.ffn_up.weight"), q8, &[inter, hidden])
+            .add(format!("{p}.ffn_down.weight"), q8, &[hidden, inter]);
+    }
+    b.add("output_norm.weight", F32, &[hidden])
+        .add("output.weight", q8, &[vocab, hidden]);
+    let u32v = |v: u64| MetaValue::U32(v as u32);
+    let kv_pairs = vec![
+        (
+            "general.architecture".to_string(),
+            MetaValue::String("llama".into()),
+        ),
+        (
+            "general.name".to_string(),
+            MetaValue::String("Tiny Llama".into()),
+        ),
+        ("llama.block_count".to_string(), u32v(layers)),
+        ("llama.context_length".to_string(), u32v(4096)),
+        ("llama.embedding_length".to_string(), u32v(hidden)),
+        ("llama.feed_forward_length".to_string(), u32v(inter)),
+        ("llama.attention.head_count".to_string(), u32v(heads)),
+        ("llama.attention.head_count_kv".to_string(), u32v(kv)),
+        ("llama.rope.freq_base".to_string(), MetaValue::F32(500000.0)),
+        (
+            "llama.attention.layer_norm_rms_epsilon".to_string(),
+            MetaValue::F32(1e-5),
+        ),
+        ("general.file_type".to_string(), u32v(7)),
+    ];
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join("tiny-llama.gguf");
+    gguf::write(&path, &kv_pairs, &b.materialize()).unwrap();
+    let cfg = json!({
+        "architectures": ["LlamaForCausalLM"],
+        "model_type": "llama",
+        "hidden_size": hidden,
+        "intermediate_size": inter,
+        "num_hidden_layers": layers,
+        "num_attention_heads": heads,
+        "num_key_value_heads": kv,
+        "head_dim": hd,
+        "vocab_size": vocab,
+        "max_position_embeddings": 4096,
+        "rms_norm_eps": 1e-5,
+        "rope_theta": 500000.0,
+        "tie_word_embeddings": false,
+        "hidden_act": "silu"
+    });
+    std::fs::write(
+        dir.join("config.json"),
+        serde_json::to_string_pretty(&cfg).unwrap(),
+    )
+    .unwrap();
     path
 }

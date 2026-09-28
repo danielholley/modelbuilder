@@ -36,7 +36,7 @@ fn settle(app: &mut App) {
 #[test]
 fn shows_a_model_its_tensors_and_plan() {
     let dir = tempfile::tempdir().unwrap();
-    let model = mb_fixtures::gguf_bonsai_like(dir.path());
+    let model = mb_fixtures::gguf_hybrid_ternary(dir.path());
     let mut app = App::new(Options {
         model: Some(model),
         hardware: vec!["1x24GB".into()],

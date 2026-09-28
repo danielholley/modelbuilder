@@ -73,6 +73,20 @@ pub struct Effect {
     pub unit: String,
 }
 
+/// How a stage uses the trunk. It decides the order stages run in: a stage
+/// trained against the trunk is invalidated by any later change to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum TrunkUse {
+    /// Changes the trunk's structure (tensors added, removed or shared).
+    Restructure,
+    /// Trains existing trunk tensors in place (QAT, long-context finetuning).
+    Adapt,
+    /// Leaves the trunk frozen and learns from its outputs (draft heads).
+    Frozen,
+}
+
 /// One training stage, described in terms the cost model can price.
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -91,6 +105,12 @@ pub struct Stage {
     pub data: String,
     /// Whether a teacher forward pass (the unmodified model) runs per token.
     pub teacher_forward: bool,
+    pub trunk: TrunkUse,
+    /// For frozen stages: the trunk's outputs are computed once beforehand
+    /// (in the serving runtime) and stored, so training never runs or holds
+    /// the trunk. Only the embedding and the tensors it backpropagates
+    /// through stay resident.
+    pub precomputed_features: bool,
 }
 
 /// Model-level inputs to the cost model.
@@ -117,6 +137,9 @@ pub struct ComputeEstimate {
     pub peak_gib_per_gpu: f64,
     /// Same, if the frozen trunk stays packed at the source bit width.
     pub peak_gib_per_gpu_packed_trunk: f64,
+    /// GPU-hours to compute precomputed features (one trunk forward per token),
+    /// separate from training; `None` when no stage precomputes.
+    pub extraction_gpu_hours: Option<Range>,
     pub fits: Fit,
     pub notes: Vec<String>,
 }
@@ -152,6 +175,7 @@ pub fn cost_model_assumptions() -> Vec<String> {
         "Trainable params cost 16 B each (BF16 weight + FP32 master + two FP32 Adam moments); frozen params 2 B each in BF16.".into(),
         format!("Activations: {MICRO_BATCH_TOKENS}-token micro-batch with activation checkpointing (≈2 B × hidden × layers per token) plus chunked BF16 logits."),
         "Multi-GPU profiles shard weights and optimizer state evenly (FSDP-style).".into(),
+        "Frozen stages with precomputed features pay one trunk forward per token at extraction (priced at the same utilization; it can run on other machines) and none in training.".into(),
     ]
 }
 
@@ -165,6 +189,7 @@ pub fn cost(inputs: &CostInputs, stages: &[Stage], hw: &HardwareProfile) -> Comp
             wall_hours: Range::zero(),
             peak_gib_per_gpu: 0.0,
             peak_gib_per_gpu_packed_trunk: 0.0,
+            extraction_gpu_hours: None,
             fits: Fit::NotApplicable,
             notes: vec!["No training stages.".into()],
         };
@@ -173,15 +198,31 @@ pub fn cost(inputs: &CostInputs, stages: &[Stage], hw: &HardwareProfile) -> Comp
     let mut flops = Range::zero();
     let mut peak_bf16: f64 = 0.0;
     let mut peak_packed: f64 = 0.0;
+    let mut extraction = Range::zero();
+    let mut extracts = false;
     for s in stages {
-        let per_token = 2.0 * n
-            + 2.0 * s.backprop_params as f64
-            + 2.0 * s.trainable_params as f64
-            + if s.teacher_forward { 2.0 * n } else { 0.0 };
-        flops = flops + s.tokens.map(|t| t * per_token);
-
+        let bp = s.backprop_params as f64;
         let trainable = s.trainable_params as f64;
-        let frozen = (n - trainable).max(0.0);
+        let precomputed = s.precomputed_features && s.trunk == TrunkUse::Frozen;
+        // With precomputed features only what follows them runs: a forward and
+        // an activation-gradient pass through `backprop_params`, and weight
+        // gradients for the trainable ones. The trunk forward moves to extraction.
+        let per_token = if precomputed {
+            4.0 * bp + 2.0 * trainable
+        } else {
+            2.0 * n + 2.0 * bp + 2.0 * trainable + if s.teacher_forward { 2.0 * n } else { 0.0 }
+        };
+        flops = flops + s.tokens.map(|t| t * per_token);
+        if precomputed {
+            extracts = true;
+            extraction = extraction + s.tokens.map(|t| t * 2.0 * n);
+        }
+        let frozen = if precomputed {
+            // Resident: the frozen tensors it backpropagates through, plus the embedding.
+            (bp - trainable).max(0.0) + (inputs.vocab * inputs.hidden) as f64
+        } else {
+            (n - trainable).max(0.0)
+        };
         // A teacher is the unmodified model: only the originals of the
         // modified tensors need to be kept alongside the student.
         let teacher_extra = if s.teacher_forward {
@@ -201,10 +242,13 @@ pub fn cost(inputs: &CostInputs, stages: &[Stage], hw: &HardwareProfile) -> Comp
             peak_packed.max(((frozen * inputs.source_bits / 8.0 + state) / g + act) / GIB);
     }
     let per_gpu = hw.peak_tflops * 1e12;
-    let gpu_hours = Range::new(
-        flops.low / (per_gpu * mfu(hw.backend).high) / 3600.0,
-        flops.high / (per_gpu * mfu(hw.backend).low) / 3600.0,
-    );
+    let hours = |f: Range| {
+        Range::new(
+            f.low / (per_gpu * mfu(hw.backend).high) / 3600.0,
+            f.high / (per_gpu * mfu(hw.backend).low) / 3600.0,
+        )
+    };
+    let gpu_hours = hours(flops);
     let usable = hw.usable_gib_per_gpu();
     let fits = if peak_bf16 <= usable {
         Fit::Yes
@@ -231,6 +275,7 @@ pub fn cost(inputs: &CostInputs, stages: &[Stage], hw: &HardwareProfile) -> Comp
         wall_hours: gpu_hours.map(|h| h / f64::from(hw.gpus)),
         peak_gib_per_gpu: peak_bf16,
         peak_gib_per_gpu_packed_trunk: peak_packed,
+        extraction_gpu_hours: extracts.then(|| hours(extraction)),
         fits,
         notes,
     }
@@ -262,7 +307,28 @@ mod tests {
             loss: String::new(),
             data: String::new(),
             teacher_forward: teacher,
+            trunk: TrunkUse::Adapt,
+            precomputed_features: false,
         }
+    }
+
+    #[test]
+    fn precomputed_features_move_the_trunk_forward_to_extraction() {
+        let mut s = stage(10_000_000, 60_000_000, 1e8, false);
+        s.trunk = TrunkUse::Frozen;
+        let online = cost(&inputs(), &[s.clone()], profile("1x24GB").unwrap());
+        s.precomputed_features = true;
+        let pre = cost(&inputs(), &[s], profile("1x24GB").unwrap());
+        // Training: 4·backprop + 2·trainable per token; no 2N trunk forward.
+        assert_eq!(pre.train_flops.low, 1e8 * (4.0 * 6e7 + 2.0 * 1e7));
+        assert!(pre.train_flops.low < online.train_flops.low / 5.0);
+        // Extraction: one trunk forward (2N) per token.
+        let ex = pre.extraction_gpu_hours.unwrap();
+        let expected = 1e8 * 2.0 * 1e9 / (165e12 * 0.45) / 3600.0;
+        assert!((ex.low - expected).abs() < 1e-9, "{ex:?}");
+        assert!(online.extraction_gpu_hours.is_none());
+        // Memory: the trunk isn't resident, only the embedding and the backprop path.
+        assert!(pre.peak_gib_per_gpu < online.peak_gib_per_gpu);
     }
 
     #[test]

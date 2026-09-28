@@ -27,9 +27,9 @@ def mb(*args: str) -> str:
 
 
 def test_mtp_align_job_end_to_end(tmp_path: Path) -> None:
-    target = Path(mb("fixture", "gguf-bonsai-like", str(tmp_path / "t")).strip())
+    target = Path(mb("fixture", "gguf-hybrid-ternary", str(tmp_path / "t")).strip())
     ref = tmp_path / "r"
-    mb("fixture", "qwen-hybrid-matching-bonsai-like", str(ref))
+    mb("fixture", "hybrid-mtp-reference", str(ref))
 
     # Synthetic trunk features: the target's own (primal) embeddings of a learnable sequence.
     mb("export-tensors", str(target), "--names", "token_embd.weight", "--dtype", "f32", "-o", str(tmp_path / "e.st"))

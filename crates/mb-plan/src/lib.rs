@@ -6,7 +6,9 @@
 
 use mb_features::estimate::{cost, cost_model_assumptions, ComputeEstimate};
 use mb_features::hardware::{profile, profiles, HardwareProfile};
-use mb_features::{catalog, feature, Compat, Context, Detection, Estimate, FeatureError, Params};
+use mb_features::{
+    catalog, feature, Compat, Context, Detection, Estimate, FeatureError, Params, Stage, TrunkUse,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
@@ -23,14 +25,14 @@ pub enum PlanError {
 ///
 /// ```toml
 /// [source]
-/// path = "models/Ternary-Bonsai-2-27B-PQ2_0.gguf"
+/// path = "models/target.gguf"
 ///
 /// [hardware]
 /// profiles = ["1x24GB", "8xH100"]
 ///
 /// [[feature]]
 /// id = "mtp"
-/// from = "models/Qwen3.8-27B"
+/// from = "models/base-model"
 ///
 /// [[feature]]
 /// id = "fp4-kv"
@@ -155,13 +157,100 @@ pub struct FeaturePlan {
     pub export_notes: Vec<String>,
 }
 
+/// One stage in the order the whole plan should run.
+#[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ScheduledStage {
+    /// 1-based position.
+    pub order: usize,
+    pub feature: String,
+    pub stage: String,
+    pub trunk: TrunkUse,
+    /// Why it runs at this position.
+    pub reason: String,
+}
+
+/// All compatible features' stages in dependency order, with totals per profile.
+#[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct Schedule {
+    pub stages: Vec<ScheduledStage>,
+    /// The whole schedule priced per hardware profile (the peak is the largest stage's).
+    pub totals: Vec<ComputeEstimate>,
+    pub notes: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Plan {
     pub model: String,
     pub hardware: Vec<HardwareProfile>,
     pub features: Vec<FeaturePlan>,
+    pub schedule: Schedule,
     pub cost_model_assumptions: Vec<String>,
+}
+
+fn reason(t: TrunkUse) -> &'static str {
+    match t {
+        TrunkUse::Restructure => "changes the trunk's structure, so it runs before anything trained against the trunk",
+        TrunkUse::Adapt => "retrains trunk tensors in place, after structural changes (so it sees the final structure) and before frozen-trunk stages",
+        TrunkUse::Frozen => "learns from the trunk's outputs, so it runs last: any later change to the trunk would invalidate it",
+    }
+}
+
+/// Orders stages restructure → adapt → frozen. The sort is stable, so each
+/// feature keeps its own stage order and features keep the request order.
+pub fn schedule(
+    features: &[FeaturePlan],
+    inputs: &mb_features::CostInputs,
+    hardware: &[&HardwareProfile],
+) -> Schedule {
+    let mut stages: Vec<(&FeaturePlan, &Stage)> = features
+        .iter()
+        .filter_map(|f| f.estimate.as_ref().map(|e| (f, e)))
+        .flat_map(|(f, e)| e.stages.iter().map(move |s| (f, s)))
+        .collect();
+    stages.sort_by_key(|(_, s)| s.trunk);
+    let ordered: Vec<Stage> = stages.iter().map(|(_, s)| (*s).clone()).collect();
+    let mut notes = Vec::new();
+    let has = |t: TrunkUse| stages.iter().any(|(_, s)| s.trunk == t);
+    if has(TrunkUse::Frozen) && (has(TrunkUse::Restructure) || has(TrunkUse::Adapt)) {
+        notes.push(
+            "Frozen-trunk stages (draft heads) are trained against the final trunk: extract their features only after the trunk-changing stages finish.".into(),
+        );
+    }
+    let adapters: std::collections::BTreeSet<&str> = stages
+        .iter()
+        .filter(|(_, s)| s.trunk == TrunkUse::Adapt)
+        .map(|(f, _)| f.id)
+        .collect();
+    if adapters.len() > 1 {
+        notes.push(format!(
+            "{} each retrain trunk tensors: when they touch the same tensors, one combined run with all their losses is cheaper than running them in sequence.",
+            adapters.into_iter().collect::<Vec<_>>().join(" and ")
+        ));
+    }
+    if stages.is_empty() {
+        notes.push("No compatible feature needs training.".into());
+    }
+    Schedule {
+        stages: stages
+            .iter()
+            .enumerate()
+            .map(|(i, (f, s))| ScheduledStage {
+                order: i + 1,
+                feature: f.id.to_string(),
+                stage: s.name.clone(),
+                trunk: s.trunk,
+                reason: reason(s.trunk).into(),
+            })
+            .collect(),
+        totals: hardware
+            .iter()
+            .map(|hw| cost(inputs, &ordered, hw))
+            .collect(),
+        notes,
+    }
 }
 
 /// Evaluates `requests` (or the whole catalog with default parameters when
@@ -219,6 +308,7 @@ pub fn plan(
     Ok(Plan {
         model: ctx.ir.raw.root.display().to_string(),
         hardware: hardware.iter().map(|h| (*h).clone()).collect(),
+        schedule: schedule(&features, &inputs, hardware),
         features,
         cost_model_assumptions: cost_model_assumptions(),
     })

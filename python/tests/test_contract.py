@@ -15,6 +15,7 @@ from modelbuilder_train.spec import JobSpec
 SPEC_SCHEMA = json.loads((SCHEMA / "job-spec.v1.schema.json").read_text())
 EVENT_SCHEMA = json.loads((SCHEMA / "events.v1.schema.json").read_text())
 EXAMPLE = json.loads((SCHEMA / "examples" / "mtp-align.job.json").read_text())
+DISTILL = json.loads((SCHEMA / "examples" / "trunk-distill.job.json").read_text())
 
 
 def both_accept(doc: dict) -> None:
@@ -31,6 +32,23 @@ def both_reject(doc: dict) -> None:
 
 def test_example_spec_is_valid():
     both_accept(EXAMPLE)
+    both_accept(DISTILL)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda s: s.pop("trunk_distill"),
+        lambda s: s["trunk_distill"].update(kv_share_group=1),
+        lambda s: s["trunk_distill"].update(kv_format="q3"),
+        lambda s: s["trunk_distill"].update(trainable=[]),
+        lambda s: s["trunk_distill"].update(extra=1),
+    ],
+)
+def test_bad_trunk_distill_is_rejected_by_both(mutate):
+    doc = copy.deepcopy(DISTILL)
+    mutate(doc["stages"][0])
+    both_reject(doc)
 
 
 @pytest.mark.parametrize(

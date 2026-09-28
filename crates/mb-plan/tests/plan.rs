@@ -12,13 +12,13 @@ fn find<'a>(p: &'a mb_plan::Plan, id: &str) -> &'a FeaturePlan {
 }
 
 #[test]
-fn whole_catalog_on_bonsai_like() {
+fn whole_catalog_on_hybrid_ternary() {
     let dir = tempfile::tempdir().unwrap();
-    let ir = load(&mb_fixtures::gguf_bonsai_like(dir.path()));
+    let ir = load(&mb_fixtures::gguf_hybrid_ternary(dir.path()));
     let ctx = Context::new(&ir, None);
     let hw = resolve_hardware(&["1x24GB".into(), "8xH100".into()]).unwrap();
     let p = plan(&ctx, &[], &hw).unwrap();
-    assert_eq!(p.features.len(), 3);
+    assert_eq!(p.features.len(), 8);
 
     // FP4 KV: 2 global layers × 2 × 2 kv heads × 32 dims = 256 elements/token.
     let fp4 = find(&p, "fp4-kv");
@@ -52,15 +52,86 @@ fn whole_catalog_on_bonsai_like() {
     );
     let st = &mtp.estimate.as_ref().unwrap().stages[0];
     assert_eq!(
-        st.trainable_params, st.backprop_params,
-        "gradients stop at the head"
+        st.trainable_params + 256 * 128,
+        st.backprop_params,
+        "gradients stop at the head, after flowing through the frozen LM head (vocab 256 × hidden 128)"
     );
+}
+
+#[test]
+fn new_catalog_features_on_hybrid_ternary() {
+    let dir = tempfile::tempdir().unwrap();
+    let ir = load(&mb_fixtures::gguf_hybrid_ternary(dir.path()));
+    let ctx = Context::new(&ir, None);
+    let hw = resolve_hardware(&["1x24GB".into()]).unwrap();
+    let p = plan(&ctx, &[], &hw).unwrap();
+
+    // MLA: 2 KV heads × 32 dims × 2 = 128 cached values; the default rank doesn't shrink that.
+    let mla = find(&p, "mla");
+    assert!(mla
+        .compat
+        .blockers
+        .iter()
+        .any(|b| b.contains("not smaller")));
+    let p2 = plan(
+        &ctx,
+        &[parse_feature_spec("mla:kv_rank=48,rope_dim=16")],
+        &hw,
+    )
+    .unwrap();
+    let e = p2.features[0].estimate.as_ref().unwrap();
+    assert_eq!((e.effects[0].before, e.effects[0].after), (512.0, 256.0));
+
+    // Pruning keeps whole periods of the 3 DeltaNet + 1 attention pattern and the last layer.
+    let prune = find(&p, "prune-layers");
+    assert!(prune.compat.ok(), "{:?}", prune.compat);
+    assert!(
+        prune.surgery[0].contains("layers 3..7"),
+        "{:?}",
+        prune.surgery
+    );
+    let bad = plan(&ctx, &[parse_feature_spec("prune-layers:count=2")], &hw).unwrap();
+    assert!(bad.features[0].compat.blockers[0].contains("period-4"));
+
+    // YaRN: 4× the configured context, one long-context stage.
+    let yarn = find(&p, "yarn");
+    assert!(yarn.compat.ok());
+    let e = yarn.estimate.as_ref().unwrap();
+    assert_eq!(e.effects[0].after, 4.0 * e.effects[0].before);
+    let none = plan(&ctx, &[parse_feature_spec("yarn:finetune=false")], &hw).unwrap();
+    assert!(none.features[0]
+        .estimate
+        .as_ref()
+        .unwrap()
+        .stages
+        .is_empty());
+
+    // MoE upcycling: 8 experts, top-2 over the 8 dense MLPs.
+    let moe = find(&p, "moe-upcycle");
+    assert!(moe.compat.ok());
+    let e = moe.estimate.as_ref().unwrap();
+    assert!(e.effects[0].after > e.effects[1].after && e.effects[1].after > e.effects[1].before);
+
+    // Draft heads: frozen trunk, precomputed features; Medusa carries its own LM heads.
+    let d = find(&p, "draft-head");
+    let st = &d.estimate.as_ref().unwrap().stages[0];
+    assert_eq!(st.trunk, mb_features::TrunkUse::Frozen);
+    assert_eq!(st.backprop_params, st.trainable_params + 256 * 128);
+    let m = plan(
+        &ctx,
+        &[parse_feature_spec("draft-head:kind=medusa,size=2")],
+        &hw,
+    )
+    .unwrap();
+    let st = &m.features[0].estimate.as_ref().unwrap().stages[0];
+    assert_eq!(st.trainable_params, 2 * (128 * 128 + 128 + 256 * 128));
+    assert!(plan(&ctx, &[parse_feature_spec("draft-head:kind=bogus")], &hw).is_err());
 }
 
 #[test]
 fn kv_share_with_group_two() {
     let dir = tempfile::tempdir().unwrap();
-    let ir = load(&mb_fixtures::gguf_bonsai_like(dir.path()));
+    let ir = load(&mb_fixtures::gguf_hybrid_ternary(dir.path()));
     let ctx = Context::new(&ir, None);
     let hw = resolve_hardware(&["8xH100".into()]).unwrap();
     let p = plan(&ctx, &[parse_feature_spec("kv-share:group=2")], &hw).unwrap();
@@ -77,7 +148,7 @@ fn kv_share_with_group_two() {
 fn mtp_detected_and_reference_checks() {
     let dir = tempfile::tempdir().unwrap();
     let qwen = load(&mb_fixtures::qwen_hybrid(&dir.path().join("q")));
-    let bonsai = load(&mb_fixtures::gguf_bonsai_like(&dir.path().join("b")));
+    let target = load(&mb_fixtures::gguf_hybrid_ternary(&dir.path().join("b")));
     let hw = resolve_hardware(&["1x24GB".into()]).unwrap();
     let mtp = [parse_feature_spec("mtp")];
 
@@ -86,7 +157,7 @@ fn mtp_detected_and_reference_checks() {
     assert!(matches!(p.features[0].detection, Detection::Present(_)));
 
     // Porting from a reference with different shapes is blocked.
-    let ctx = Context::new(&bonsai, Some(&qwen));
+    let ctx = Context::new(&target, Some(&qwen));
     let p = plan(&ctx, &mtp, &hw).unwrap();
     let blockers = &p.features[0].compat.blockers;
     assert!(
@@ -95,7 +166,7 @@ fn mtp_detected_and_reference_checks() {
     );
 
     // A `from` path that wasn't loaded is a blocker, not a panic.
-    let ctx = Context::new(&bonsai, None);
+    let ctx = Context::new(&target, None);
     let p = plan(&ctx, &[parse_feature_spec("mtp:from=/nowhere")], &hw).unwrap();
     assert!(p.features[0].compat.blockers[0].contains("was not loaded"));
 }
@@ -133,10 +204,17 @@ fn mla_model_and_bad_params() {
 
 #[test]
 fn example_recipes_parse() {
-    let r = mb_plan::Recipe::parse(include_str!(
-        "../../../examples/recipes/bonsai2-kv-and-mtp.toml"
-    ))
-    .unwrap();
+    // The generic example, and the task-specific one kept with the runbooks.
+    for text in [
+        include_str!("../../../examples/recipes/kv-and-mtp.toml"),
+        include_str!("../../../docs/runbooks/bonsai2-kv-and-mtp.toml"),
+    ] {
+        example_recipe_is_valid(text);
+    }
+}
+
+fn example_recipe_is_valid(text: &str) {
+    let r = mb_plan::Recipe::parse(text).unwrap();
     assert_eq!(
         r.features.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
         ["fp4-kv", "kv-share", "mtp"]
@@ -145,4 +223,43 @@ fn example_recipes_parse() {
     for f in &r.features {
         mb_features::feature(&f.id).unwrap();
     }
+}
+
+#[test]
+fn schedule_orders_restructure_then_adapt_then_frozen() {
+    let dir = tempfile::tempdir().unwrap();
+    let ir = load(&mb_fixtures::gguf_hybrid_ternary(dir.path()));
+    let ctx = Context::new(&ir, None);
+    let hw = resolve_hardware(&["1x24GB".into()]).unwrap();
+    // Requested in the "wrong" order on purpose.
+    let reqs = ["mtp", "fp4-kv", "kv-share:group=2"].map(parse_feature_spec);
+    let p = plan(&ctx, &reqs, &hw).unwrap();
+    let order: Vec<(&str, &str)> = p
+        .schedule
+        .stages
+        .iter()
+        .map(|s| (s.feature.as_str(), s.stage.as_str()))
+        .collect();
+    assert_eq!(
+        order,
+        [
+            ("kv-share", "reuse-adapt"),
+            ("kv-share", "long-context"),
+            ("fp4-kv", "kv-fp4-qat"),
+            ("mtp", "mtp-align")
+        ]
+    );
+    assert_eq!(p.schedule.stages[0].order, 1);
+    assert!(p.schedule.notes.iter().any(|n| n.contains("Frozen-trunk")));
+    // Totals: one per profile, summing every stage's training FLOPs.
+    let t = &p.schedule.totals[0];
+    let sum: f64 = p
+        .features
+        .iter()
+        .flat_map(|f| f.compute.iter())
+        .map(|c| c.train_flops.low)
+        .sum();
+    assert!((t.train_flops.low - sum).abs() <= sum * 1e-9);
+    // The MTP stage precomputes features, so extraction is priced separately.
+    assert!(t.extraction_gpu_hours.is_some());
 }

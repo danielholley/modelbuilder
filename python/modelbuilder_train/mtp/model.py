@@ -1,21 +1,22 @@
-"""Qwen3.5/3.8-style MTP head in PyTorch.
+"""A DeepSeek-V3-style MTP (next-n) head in PyTorch, configured from an HF config.
 
-Mirrors ``graph_mtp`` in the PrismML llama.cpp fork (``src/models/qwen35.cpp``)
-operation for operation, so a head trained here drafts the same way at
-inference:
+The block matches llama.cpp's nextn graph operation for operation, so a head
+trained here drafts the same way at inference:
 
     e = enorm(embed(x[t+1]))            h = hnorm(trunk_hidden[t])
     x = eh_proj(concat(e, h))           # concat order: embedding first
-    x = x + attn(input_layernorm(x))    # gated full attention, Q/K norms, partial RoPE
+    x = x + attn(input_layernorm(x))    # full attention: optional output gate, Q/K norms, partial RoPE
     x = x + ffn(post_attention_layernorm(x))   # SwiGLU
     logits = lm_head(norm(x))           # predicts x[t+2]
 
 ``trunk_hidden`` is the trunk's output *after* its final norm (llama.cpp's
 ``h_nextn``, the same tensor ``llama-embedding --pooling none`` returns).
 
-Weights use Hugging Face names and conventions (``mtp.*`` without the prefix):
-RMSNorm weights are zero-centered, i.e. applied as ``x / rms(x) * (1 + w)``.
-The GGUF sidecar stores them with the +1 folded in (see ``mb-surgery``).
+What varies between model families is data in :data:`FAMILIES`, keyed by the
+HF ``model_type`` and overridable by config keys: whether RMSNorm weights are
+zero-centered (applied as ``x·(1+w)``; the GGUF stores ``w+1``), whether the
+attention output is gated (``attn_output_gate``), whether Q/K are normed, and
+whether projections have biases. Weights use HF names (``mtp.*``).
 """
 
 from __future__ import annotations
@@ -28,6 +29,17 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+#: Per-family defaults, keyed by HF ``model_type``. Config keys win when present.
+FAMILIES: dict[str, dict] = {
+    "qwen3_5": {"norm_offset": 1.0, "attn_gate": True, "qk_norm": True, "attention_bias": False},
+    "qwen3_5_text": {"norm_offset": 1.0, "attn_gate": True, "qk_norm": True, "attention_bias": False},
+    "qwen3_next": {"norm_offset": 1.0, "attn_gate": True, "qk_norm": True, "attention_bias": False},
+    "qwen3": {"norm_offset": 0.0, "attn_gate": False, "qk_norm": True, "attention_bias": False},
+    "qwen2": {"norm_offset": 0.0, "attn_gate": False, "qk_norm": False, "attention_bias": True},
+    "llama": {"norm_offset": 0.0, "attn_gate": False, "qk_norm": False, "attention_bias": False},
+    "mistral": {"norm_offset": 0.0, "attn_gate": False, "qk_norm": False, "attention_bias": False},
+}
+
 
 @dataclass(frozen=True)
 class MtpConfig:
@@ -37,13 +49,26 @@ class MtpConfig:
     head_dim: int
     intermediate_size: int
     rotary_dim: int
-    rope_theta: float = 10_000_000.0
+    rope_theta: float = 10_000.0
     rms_eps: float = 1e-6
+    #: 1.0 for zero-centered RMSNorm (``x·(1+w)``), 0.0 for the plain kind (``x·w``).
+    norm_offset: float = 0.0
+    #: Sigmoid output gate per head, packed with Q in ``q_proj`` (``[q, gate]`` per head).
+    attn_gate: bool = False
+    qk_norm: bool = False
+    attention_bias: bool = False
 
     @classmethod
     def from_hf_config(cls, cfg: dict) -> MtpConfig:
-        """Reads a Qwen3.5-family ``config.json`` (``text_config`` if nested)."""
+        """Reads a decoder-only HF ``config.json`` (``text_config`` if nested)."""
         t = cfg.get("text_config", cfg)
+        model_type = t.get("model_type") or cfg.get("model_type", "")
+        if model_type not in FAMILIES:
+            raise ValueError(
+                f"model_type {model_type!r} has no MTP-head family defaults; add it to FAMILIES "
+                f"in modelbuilder_train/mtp/model.py (known: {', '.join(sorted(FAMILIES))})"
+            )
+        fam = FAMILIES[model_type]
         rope = t.get("rope_parameters") or t.get("rope_scaling") or {}
         partial = t.get("partial_rotary_factor", rope.get("partial_rotary_factor", 1.0))
         head_dim = t.get("head_dim") or t["hidden_size"] // t["num_attention_heads"]
@@ -54,22 +79,29 @@ class MtpConfig:
             head_dim=head_dim,
             intermediate_size=t["intermediate_size"],
             rotary_dim=int(head_dim * partial),
-            rope_theta=float(t.get("rope_theta", rope.get("rope_theta", 10_000_000.0))),
+            rope_theta=float(t.get("rope_theta", rope.get("rope_theta", 10_000.0))),
             rms_eps=float(t.get("rms_norm_eps", 1e-6)),
+            norm_offset=float(fam["norm_offset"]),
+            attn_gate=bool(t.get("attn_output_gate", fam["attn_gate"])),
+            qk_norm=bool(fam["qk_norm"]),
+            attention_bias=bool(t.get("attention_bias", fam["attention_bias"])),
         )
 
 
-class ZeroCenteredRMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float) -> None:
+class RMSNorm(nn.Module):
+    """``x / rms(x) · (offset + w)``: offset 1 for zero-centered weights (initialized to 0), 0 otherwise."""
+
+    def __init__(self, dim: int, eps: float, offset: float = 0.0) -> None:
         super().__init__()
-        self.weight = nn.Parameter(torch.zeros(dim))
+        self.offset = offset
+        self.weight = nn.Parameter(torch.zeros(dim) if offset else torch.ones(dim))
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         dtype = x.dtype
         x = x.float()
         x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-        return (x * (1.0 + self.weight.float())).to(dtype)
+        return (x * (self.offset + self.weight.float())).to(dtype)
 
 
 def apply_partial_rope(x: torch.Tensor, positions: torch.Tensor, rotary_dim: int, theta: float) -> torch.Tensor:
@@ -88,21 +120,27 @@ class GatedAttention(nn.Module):
     def __init__(self, c: MtpConfig) -> None:
         super().__init__()
         self.c = c
-        self.q_proj = nn.Linear(c.hidden_size, 2 * c.num_heads * c.head_dim, bias=False)
-        self.k_proj = nn.Linear(c.hidden_size, c.num_kv_heads * c.head_dim, bias=False)
-        self.v_proj = nn.Linear(c.hidden_size, c.num_kv_heads * c.head_dim, bias=False)
+        q_out = (2 if c.attn_gate else 1) * c.num_heads * c.head_dim
+        self.q_proj = nn.Linear(c.hidden_size, q_out, bias=c.attention_bias)
+        self.k_proj = nn.Linear(c.hidden_size, c.num_kv_heads * c.head_dim, bias=c.attention_bias)
+        self.v_proj = nn.Linear(c.hidden_size, c.num_kv_heads * c.head_dim, bias=c.attention_bias)
         self.o_proj = nn.Linear(c.num_heads * c.head_dim, c.hidden_size, bias=False)
-        self.q_norm = ZeroCenteredRMSNorm(c.head_dim, c.rms_eps)
-        self.k_norm = ZeroCenteredRMSNorm(c.head_dim, c.rms_eps)
+        if c.qk_norm:
+            self.q_norm = RMSNorm(c.head_dim, c.rms_eps, c.norm_offset)
+            self.k_norm = RMSNorm(c.head_dim, c.rms_eps, c.norm_offset)
 
     def forward(self, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         c = self.c
         b, t, _ = x.shape
-        # Per head: [q (head_dim), gate (head_dim)] — llama.cpp views stride 2·head_dim.
-        qg = self.q_proj(x).view(b, t, c.num_heads, 2 * c.head_dim)
-        q, gate = qg[..., : c.head_dim], qg[..., c.head_dim :]
-        q = self.q_norm(q)
-        k = self.k_norm(self.k_proj(x).view(b, t, c.num_kv_heads, c.head_dim))
+        if c.attn_gate:
+            # Per head: [q (head_dim), gate (head_dim)] — llama.cpp views stride 2·head_dim.
+            qg = self.q_proj(x).view(b, t, c.num_heads, 2 * c.head_dim)
+            q, gate = qg[..., : c.head_dim], qg[..., c.head_dim :]
+        else:
+            q, gate = self.q_proj(x).view(b, t, c.num_heads, c.head_dim), None
+        k = self.k_proj(x).view(b, t, c.num_kv_heads, c.head_dim)
+        if c.qk_norm:
+            q, k = self.q_norm(q), self.k_norm(k)
         v = self.v_proj(x).view(b, t, c.num_kv_heads, c.head_dim)
         q = apply_partial_rope(q, positions, c.rotary_dim, c.rope_theta)
         k = apply_partial_rope(k, positions, c.rotary_dim, c.rope_theta)
@@ -112,7 +150,8 @@ class GatedAttention(nn.Module):
         out = F.scaled_dot_product_attention(
             q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=True, scale=1.0 / math.sqrt(c.head_dim)
         ).transpose(1, 2)
-        out = out * torch.sigmoid(gate)
+        if gate is not None:
+            out = out * torch.sigmoid(gate)
         return self.o_proj(out.reshape(b, t, c.num_heads * c.head_dim))
 
 
@@ -130,9 +169,9 @@ class SwiGLU(nn.Module):
 class DecoderLayer(nn.Module):
     def __init__(self, c: MtpConfig) -> None:
         super().__init__()
-        self.input_layernorm = ZeroCenteredRMSNorm(c.hidden_size, c.rms_eps)
+        self.input_layernorm = RMSNorm(c.hidden_size, c.rms_eps, c.norm_offset)
         self.self_attn = GatedAttention(c)
-        self.post_attention_layernorm = ZeroCenteredRMSNorm(c.hidden_size, c.rms_eps)
+        self.post_attention_layernorm = RMSNorm(c.hidden_size, c.rms_eps, c.norm_offset)
         self.mlp = SwiGLU(c)
 
     def forward(self, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
@@ -146,11 +185,11 @@ class MtpHead(nn.Module):
     def __init__(self, c: MtpConfig) -> None:
         super().__init__()
         self.config = c
-        self.pre_fc_norm_embedding = ZeroCenteredRMSNorm(c.hidden_size, c.rms_eps)
-        self.pre_fc_norm_hidden = ZeroCenteredRMSNorm(c.hidden_size, c.rms_eps)
+        self.pre_fc_norm_embedding = RMSNorm(c.hidden_size, c.rms_eps, c.norm_offset)
+        self.pre_fc_norm_hidden = RMSNorm(c.hidden_size, c.rms_eps, c.norm_offset)
         self.fc = nn.Linear(2 * c.hidden_size, c.hidden_size, bias=False)
         self.layers = nn.ModuleList([DecoderLayer(c)])
-        self.norm = ZeroCenteredRMSNorm(c.hidden_size, c.rms_eps)
+        self.norm = RMSNorm(c.hidden_size, c.rms_eps, c.norm_offset)
 
     def forward(self, trunk_hidden: torch.Tensor, next_embeds: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         """Returns the normed hidden state that the (frozen) LM head reads.

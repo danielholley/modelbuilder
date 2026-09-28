@@ -12,7 +12,7 @@ use serde::Deserialize;
 use super::{backprop_params_from, global_attention_layers, params_of};
 use crate::{
     parse_params, Compat, Confidence, Context, Detection, Effect, Estimate, Feature, FeatureError,
-    Params, QualityRisk, Range, RiskLevel, Stage,
+    Params, QualityRisk, Range, RiskLevel, Stage, TrunkUse,
 };
 use mb_ir::TensorKind;
 
@@ -177,6 +177,8 @@ impl Feature for KvShare {
                 loss: "KL to the unmodified model plus MSE on each attention block's output".into(),
                 data: "broad pretraining-style text; teacher logits come from the unmodified model".into(),
                 teacher_forward: true,
+                trunk: TrunkUse::Restructure,
+                precomputed_features: false,
             },
             Stage {
                 name: "long-context".into(),
@@ -188,6 +190,8 @@ impl Feature for KvShare {
                 loss: "KL to the unmodified model".into(),
                 data: "long documents (books, code repositories, multi-document QA)".into(),
                 teacher_forward: true,
+                trunk: TrunkUse::Restructure,
+                precomputed_features: false,
             },
         ];
 

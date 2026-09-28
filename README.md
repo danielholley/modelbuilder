@@ -75,7 +75,7 @@ With no `-f`, it evaluates the whole catalog.
 cargo run -- features                                   # catalog + hardware profiles
 cargo run --release -- plan path/to/model.gguf          # everything, all profiles
 cargo run --release -- plan path/to/model.gguf -f kv-share:group=2 -f mtp:from=path/to/base --hardware 1x24GB,8xH100
-cargo run --release -- plan --recipe examples/recipes/bonsai2-kv-and-mtp.toml --json
+cargo run --release -- plan --recipe examples/recipes/kv-and-mtp.toml --json
 ```
 
 ## Surgery: add an MTP head to Bonsai 2

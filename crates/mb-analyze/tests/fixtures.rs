@@ -132,11 +132,11 @@ fn gguf_mixed_quant() {
     assert!(r.provenance.has_chat_template);
 }
 
-/// The ternary GGUF path, shaped like the released Ternary-Bonsai-2-27B files.
+/// The ternary GGUF path: rotated PQ2_0 weights in the qwen35 layout.
 #[test]
-fn gguf_bonsai_like() {
+fn gguf_hybrid_ternary() {
     let dir = tempfile::tempdir().unwrap();
-    let ir = load(&mb_fixtures::gguf_bonsai_like(dir.path()));
+    let ir = load(&mb_fixtures::gguf_hybrid_ternary(dir.path()));
     assert!(ir.warnings.is_empty(), "{:?}", ir.warnings);
     let r = analyze(&ir, None);
     assert_eq!(
@@ -176,10 +176,10 @@ fn gguf_bonsai_like() {
     assert_eq!(r.kv_cache.linear_state_bytes, Some(expected_state));
 }
 
-/// The real Qwen3.8-27B layout (the base of Bonsai 2 27B), from config alone,
-/// reproduces the KV figure in docs/research/targets.md.
+/// A full-size hybrid config (64 layers, 16 GQA layers of 4 KV heads × 256, 262K
+/// context), from config alone: 64 KiB/token and 16 GiB at full context.
 #[test]
-fn qwen3_8_27b_kv_from_config() {
+fn full_size_hybrid_kv_from_config() {
     let layer_types: Vec<&str> = (0..64)
         .map(|i| {
             if i % 4 == 3 {
@@ -190,7 +190,7 @@ fn qwen3_8_27b_kv_from_config() {
         })
         .collect();
     let config = json!({
-        "model_type": "qwen3_8",
+        "model_type": "qwen3_5",
         "text_config": {
             "num_hidden_layers": 64, "hidden_size": 5120, "intermediate_size": 17408,
             "num_attention_heads": 24, "num_key_value_heads": 4, "head_dim": 256,

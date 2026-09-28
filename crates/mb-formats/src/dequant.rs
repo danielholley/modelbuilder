@@ -38,7 +38,7 @@ pub fn f16_to_f32(h: u16) -> f32 {
     f32::from_bits(bits)
 }
 
-fn half(b: &[u8]) -> f32 {
+pub(crate) fn half(b: &[u8]) -> f32 {
     f16_to_f32(u16::from_le_bytes([b[0], b[1]]))
 }
 

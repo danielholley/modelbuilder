@@ -25,11 +25,9 @@ fn kv<'a>(ir: &'a ModelIr, key: &str) -> Option<&'a mb_ir::MetaValue> {
 #[test]
 fn ports_the_head_into_an_mtp_only_sidecar() {
     let dir = tempfile::tempdir().unwrap();
-    let (target, target_ir) = open(&mb_fixtures::gguf_bonsai_like(&dir.path().join("b")));
-    let (reference, reference_ir) = open(&mb_fixtures::qwen_hybrid_matching_bonsai_like(
-        &dir.path().join("q"),
-    ));
-    let out = dir.path().join("bonsai-like-mtp.gguf");
+    let (target, target_ir) = open(&mb_fixtures::gguf_hybrid_ternary(&dir.path().join("b")));
+    let (reference, reference_ir) = open(&mb_fixtures::hybrid_mtp_reference(&dir.path().join("q")));
+    let out = dir.path().join("target-mtp.gguf");
     let report = port_mtp_sidecar(
         &target,
         &target_ir,
@@ -92,11 +90,9 @@ fn ports_the_head_into_an_mtp_only_sidecar() {
 #[test]
 fn refuses_unsafe_or_mismatched_inputs() {
     let dir = tempfile::tempdir().unwrap();
-    let target_path = mb_fixtures::gguf_bonsai_like(&dir.path().join("b"));
+    let target_path = mb_fixtures::gguf_hybrid_ternary(&dir.path().join("b"));
     let (target, target_ir) = open(&target_path);
-    let (good, good_ir) = open(&mb_fixtures::qwen_hybrid_matching_bonsai_like(
-        &dir.path().join("q"),
-    ));
+    let (good, good_ir) = open(&mb_fixtures::hybrid_mtp_reference(&dir.path().join("q")));
     let (small, small_ir) = open(&mb_fixtures::qwen_hybrid(&dir.path().join("s")));
     let opts = MtpSidecarOptions::default();
 
@@ -155,7 +151,7 @@ fn exports_rotated_tensors_in_the_primal_basis() {
     use mb_ir::DType;
     use mb_surgery::export::{export_primal, ExportOptions};
     let dir = tempfile::tempdir().unwrap();
-    let (m, ir) = open(&mb_fixtures::gguf_bonsai_like(dir.path()));
+    let (m, ir) = open(&mb_fixtures::gguf_hybrid_ternary(dir.path()));
     let out = dir.path().join("frozen.safetensors");
     let names = vec![
         "output.weight".to_string(),

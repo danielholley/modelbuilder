@@ -49,7 +49,7 @@ async fn api(app: &Router, method: &str, uri: &str, body: Option<Value>) -> (Sta
 #[tokio::test]
 async fn serves_the_api_over_fixtures() {
     let dir = tempfile::tempdir().unwrap();
-    let model = mb_fixtures::gguf_bonsai_like(dir.path())
+    let model = mb_fixtures::gguf_hybrid_ternary(dir.path())
         .display()
         .to_string();
     let app = app(None);

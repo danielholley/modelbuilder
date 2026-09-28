@@ -1,8 +1,7 @@
 # Status and plan
 
 What has been built so far, what it was checked against, what is missing, and
-the plan for the next three pieces of work. As of 2026-09-27, `main` at
-`00740e5`. The design is in [`CLAUDE.md`](../CLAUDE.md), and the research
+the plan for the next three pieces of work. As of 2026-09-28 (PRs up to #8 merged, later work on the branch below). The design is in [`CLAUDE.md`](../CLAUDE.md), and the research
 behind each technique is in [`docs/research/`](research/).
 
 ## Goal
@@ -64,22 +63,65 @@ python -m modelbuilder_train extract-features | run | validate | evaluate-mtp
 binary on fixtures) and 7 web tests, all in CI. Every test uses tiny synthetic
 checkpoints; nothing downloads a model.
 
+## Added after PR #8 (branch `claude/cool-feynman-b75slo`)
+
+Everything below works on any model with a matching architecture adapter.
+Nothing in the code names a specific model; notes about the first target
+live in `docs/runbooks/` and `docs/research/`.
+
+- **Architecture adapters** (`mb-surgery/src/arch.rs`): tables for `llama`,
+  `qwen2`, `qwen3` and `qwen35` that invert llama.cpp's converter (RoPE
+  permutes, norm offsets, V-head reorders, conv shapes). `export-hf` and
+  `surgery replace` both use them. GGUF → HF → GGUF is byte-identical on the
+  llama and hybrid-ternary fixtures.
+- **Encoders** (`mb-formats/src/quant.rs`): ggml's reference quantizers for
+  Q8_0, PQ2_0 and PTQ1_0, byte-identical on the fork's golden blocks.
+- **`surgery replace`**: writes trained HF tensors back into a GGUF,
+  re-rotated and re-encoded to each tensor's original type. It reports each
+  tensor's re-quantization error and refuses above `--max-rel-error`.
+- **The `trunk_distill` stage** (hf backend, `python/modelbuilder_train/hf/`):
+  - QAT for a quantized KV cache (`q8_0`, `q4_0`, `nvfp4`);
+  - cross-layer KV sharing;
+  - weights fake-quantized through their stored format and rotation, so the
+    write-back is exact (0.000% on the fixtures, including rotated PQ2_0).
+
+  `modelbuilder job trunk-distill` chains export → train → write-back. It
+  works with any transformers model through a registered attention
+  implementation.
+- **Stage ordering**: the planner schedules restructure → adapt → frozen, and
+  prices precomputed-feature stages correctly (extraction is shown
+  separately).
+- **Probes** (`probe perplexity | needle | kv-cache | hf-vs-gguf`):
+  llama.cpp perplexity and needle retrieval per KV-cache type, and a
+  token-by-token check of an HF export against its GGUF.
+- **Catalog**: `mla` (MHA2MLA/TransMLA), `draft-head` (Medusa, EAGLE,
+  DSpark), `yarn`, `prune-layers` (Gromov et al.) and `moe-upcycle` (sparse
+  upcycling). Each has cited sources, and all are tested in
+  `mb-plan/tests/plan.rs`.
+- **GGUF surgery**:
+  - `surgery prune`: layers are dropped and renumbered, and per-layer
+    metadata and tensor-name lists are kept in sync. It refuses cuts that
+    break an interval-based layer pattern.
+  - `surgery yarn`: sets the RoPE scaling metadata.
+
 ## Not done yet
 
-- **A real alignment run on Bonsai 2.** The code works, but a useful run is
-  impractical today (next section).
-- **Draft acceptance of an aligned sidecar.** Only the unaligned port has been
-  measured.
-- **Any restructuring surgery.** `fp4-kv` and `kv-share` exist only as plans
-  (detection, compatibility, cost). No checkpoint rewrite, training stage or
-  export exists for them.
-- **Stage ordering across features.** `plan` prices each feature
-  independently and doesn't say what order to train them in.
-- **Behavioral probes and evals** (perplexity, long-context retrieval, code,
-  tool use). They are designed but not built.
-- **Other catalog items:** Medusa/EAGLE/DSpark drafters, GQA→MLA, sparse
-  attention, context extension (YaRN), MoE upcycling, pruning, vocab changes.
-- **Other backends:** `hf` (transformers + FSDP/DeepSpeed + PEFT), `mlx`, `torchtitan`.
+- **Real-model checks of the new pipeline**:
+  - `hf-vs-gguf` on a pruned copy of the target (about 17 GB of disk for a
+    4-layer f32 export, most of it the 248K-vocabulary embedding and LM head);
+  - a trunk-distill run on GPUs.
+
+  Steps are in [`docs/runbooks/verify-export-and-kv-qat.md`](runbooks/verify-export-and-kv-qat.md).
+- **The quantized-KV measurement** on the target (the `probe kv-cache`
+  sweep), to decide whether QAT is needed.
+- **Runtime for KV sharing**: training works, but no llama.cpp build runs
+  reuse layers, and `surgery replace` doesn't drop the reuse layers' K/V.
+- **Surgery for `mla` and `moe-upcycle`**: they are planned only. The outlines
+  say what would change.
+- **Draft-head training** for Medusa/EAGLE/DSpark: only `mtp_align` has a
+  training stage.
+- **Other backends:** `mlx`, `torchtitan`. The `hf` stage runs on one GPU per
+  process, with DDP over gradients only; there is no FSDP yet.
 
 ## Why a real training run isn't practical yet
 

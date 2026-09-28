@@ -58,13 +58,33 @@ def test_save_load_round_trip(tiny, tmp_path):
         assert torch.equal(a, b), k
 
 
-def test_zero_initialised_norms_are_identity_scale(tiny):
-    # HF zero-centred norms: weight 0 means scale 1.
-    from modelbuilder_train.mtp.model import ZeroCenteredRMSNorm
+def test_fresh_norms_are_identity_scale_either_way(tiny):
+    # Zero-centred norms start at weight 0 (scale 1), plain ones at weight 1.
+    from modelbuilder_train.mtp.model import RMSNorm
 
-    n = ZeroCenteredRMSNorm(4, 1e-6)
     x = torch.tensor([[1.0, -1.0, 1.0, -1.0]])
-    assert torch.allclose(n(x), x)
+    for offset in (1.0, 0.0):
+        n = RMSNorm(4, 1e-6, offset)
+        assert torch.allclose(n(x), x)
+        assert n.weight.eq(0.0 if offset else 1.0).all()
+
+
+def test_head_follows_the_config_family():
+    from modelbuilder_train.mtp.model import MtpConfig, MtpHead
+
+    llama = {"model_type": "llama", "hidden_size": 32, "num_attention_heads": 4, "num_key_value_heads": 2,
+             "intermediate_size": 64, "rms_norm_eps": 1e-5, "rope_theta": 500000.0}  # fmt: skip
+    c = MtpConfig.from_hf_config(llama)
+    assert (c.norm_offset, c.attn_gate, c.qk_norm, c.head_dim, c.rotary_dim) == (0.0, False, False, 8, 8)
+    names = set(MtpHead(c).state_dict())
+    assert "layers.0.self_attn.q_norm.weight" not in names
+    assert MtpHead(c).layers[0].self_attn.q_proj.out_features == 32  # no gate half
+    out = MtpHead(c)(torch.randn(1, 5, 32), torch.randn(1, 5, 32), torch.arange(5))
+    assert out.shape == (1, 5, 32)
+    # A config key overrides the family default.
+    assert MtpConfig.from_hf_config(llama | {"attn_output_gate": True}).attn_gate
+    with pytest.raises(ValueError, match="no MTP-head family"):
+        MtpConfig.from_hf_config(llama | {"model_type": "gpt2"})
 
 
 def test_causal(tiny):

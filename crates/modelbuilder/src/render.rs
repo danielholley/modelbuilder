@@ -448,6 +448,16 @@ pub fn plan(p: &mb_plan::Plan) -> String {
                     s,
                     "                (peak GiB: BF16 trunk / trunk kept packed)"
                 );
+                for c in &f.compute {
+                    if let Some(x) = c.extraction_gpu_hours {
+                        let _ = writeln!(
+                            s,
+                            "                {:<13} + {} GPU-hours to precompute trunk features",
+                            c.profile,
+                            hours(x)
+                        );
+                    }
+                }
             }
             let _ = writeln!(
                 s,
@@ -470,6 +480,44 @@ pub fn plan(p: &mb_plan::Plan) -> String {
             for r in &e.references {
                 let _ = writeln!(s, "    source:     {r}");
             }
+        }
+        let _ = writeln!(s);
+    }
+    if !p.schedule.stages.is_empty() {
+        let _ = writeln!(s, "SCHEDULE (run in this order)");
+        for st in &p.schedule.stages {
+            let _ = writeln!(
+                s,
+                "  {}. {:<10} {:<16} {:<11} {}",
+                st.order,
+                st.feature,
+                st.stage,
+                format!("{:?}", st.trunk).to_lowercase(),
+                st.reason
+            );
+        }
+        let _ = writeln!(s, "  total:");
+        for c in &p.schedule.totals {
+            let fits = match c.fits {
+                Fit::Yes => "fits",
+                Fit::WithPackedTrunk => "only with packed trunk",
+                Fit::No => "doesn't fit",
+                Fit::NotApplicable => "-",
+            };
+            let extract = c.extraction_gpu_hours.map_or(String::new(), |x| {
+                format!(", + {} GPU-h extraction", hours(x))
+            });
+            let _ = writeln!(
+                s,
+                "    {:<13} {} GPU-h, {} wall, peak {:.0} GiB/GPU ({fits}){extract}",
+                c.profile,
+                hours(c.gpu_hours),
+                hours(c.wall_hours),
+                c.peak_gib_per_gpu
+            );
+        }
+        for n in &p.schedule.notes {
+            let _ = writeln!(s, "  note: {n}");
         }
         let _ = writeln!(s);
     }

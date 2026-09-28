@@ -8,7 +8,7 @@ use serde::Deserialize;
 use super::{backprop_params_from, global_attention_layers, params_of};
 use crate::{
     parse_params, Compat, Confidence, Context, Detection, Effect, Estimate, Feature, FeatureError,
-    Params, QualityRisk, Range, RiskLevel, Stage,
+    Params, QualityRisk, Range, RiskLevel, Stage, TrunkUse,
 };
 use mb_ir::TensorKind;
 
@@ -123,6 +123,8 @@ impl Feature for Fp4Kv {
                     loss: "KL divergence to the same model with a BF16 KV cache (self-distillation)".into(),
                     data: "general text with a share of long documents; the model's own generations work, since the teacher is the unmodified model".into(),
                     teacher_forward: true,
+                trunk: TrunkUse::Adapt,
+                precomputed_features: false,
                 }]
             }
         };
@@ -131,7 +133,7 @@ impl Feature for Fp4Kv {
             Mode::Ptq => (
                 QualityRisk {
                     level: RiskLevel::Medium,
-                    expected: "Small losses concentrated in long-context retrieval; not measured for this model. PrismML reports 'near-lossless' 4-bit KV for the sibling 1-bit Bonsai 27B (model card), which is evidence but not a measurement of this checkpoint.".into(),
+                    expected: "Small losses concentrated in long-context retrieval; not measured for this model. Measure them first with `modelbuilder_train probe kv-cache` (perplexity and retrieval per cache type).".into(),
                     recovery: "Run the long-context probes; if retrieval drops, switch to mode = \"qat\".".into(),
                 },
                 Confidence::Medium,
@@ -158,7 +160,6 @@ impl Feature for Fp4Kv {
             confidence,
             references: vec![
                 "DeepSeek-V4.1-Flash, arXiv 2609.19969, §2.4.4 (FP4 main KV cache)".into(),
-                "prism-ml/Bonsai-27B-gguf model card (4-bit KV on the 1-bit sibling)".into(),
             ],
         })
     }

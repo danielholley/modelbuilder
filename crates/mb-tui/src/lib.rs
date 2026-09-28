@@ -535,6 +535,37 @@ impl App {
             Some(Ok(p)) => p,
         };
         let mut lines: Vec<Line> = Vec::new();
+        if !plan.schedule.stages.is_empty() {
+            lines.push(Line::from("Schedule (run in this order)").bold());
+            for st in &plan.schedule.stages {
+                lines.push(Line::from(vec![
+                    Span::raw(format!(
+                        "  {}. {:<10} {:<16} ",
+                        st.order, st.feature, st.stage
+                    )),
+                    Span::styled(
+                        format!("{:?}", st.trunk).to_lowercase(),
+                        Style::new().fg(MUTED),
+                    ),
+                ]));
+            }
+            for c in &plan.schedule.totals {
+                lines.push(Line::from(format!(
+                    "  total {:<12} {} GPU-h, {} wall{}",
+                    c.profile,
+                    range(c.gpu_hours.low, c.gpu_hours.high),
+                    range(c.wall_hours.low, c.wall_hours.high),
+                    c.extraction_gpu_hours.map_or(String::new(), |x| format!(
+                        ", + {} GPU-h extraction",
+                        range(x.low, x.high)
+                    ))
+                )));
+            }
+            for n in &plan.schedule.notes {
+                lines.push(Line::styled(format!("  {n}"), Style::new().fg(MUTED)));
+            }
+            lines.push(Line::raw(""));
+        }
         for fp in &plan.features {
             let (tone, label) = if !fp.compat.blockers.is_empty() {
                 (CRITICAL, "✕ blocked")

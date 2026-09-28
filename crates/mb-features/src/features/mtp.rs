@@ -1,22 +1,22 @@
 //! Multi-token prediction (MTP) head for self-speculative decoding.
 //!
 //! Two routes:
-//! - **Port** the head from a reference model that has one (for Bonsai 2: the
-//!   Qwen3.8-27B base, `mtp_num_hidden_layers = 1`), then realign it to the
-//!   modified trunk with the trunk frozen.
+//! - **Port** the head from a reference model that has one (typically the base
+//!   model a quantized or fine-tuned target was derived from, e.g. one with
+//!   `mtp_num_hidden_layers = 1`), then realign it to the target's trunk with
+//!   the trunk frozen.
 //! - **Train** a fresh head, initialized from the last full-attention block.
 //!
-//! GGUF layout follows the PrismML-Eng/llama.cpp `qwen35` loader
-//! (`src/models/qwen35.cpp`) and converter (`conversion/qwen.py`): the head is
-//! an extra full-attention decoder block `blk.{n_layer}` plus
-//! `blk.{n_layer}.nextn.{eh_proj,enorm,hnorm,shared_head_norm}`.
+//! GGUF layout follows llama.cpp's nextn convention (see the architecture
+//! adapters in `mb-surgery`): the head is an extra full-attention decoder
+//! block `blk.{n_layer}` plus `blk.{n_layer}.nextn.{eh_proj,enorm,hnorm,shared_head_norm}`.
 
 use serde::Deserialize;
 
 use super::{gib, global_attention_layers};
 use crate::{
     parse_params, Compat, Confidence, Context, Detection, Effect, Estimate, Feature, FeatureError,
-    Params, QualityRisk, Range, RiskLevel, Stage,
+    Params, QualityRisk, Range, RiskLevel, Stage, TrunkUse,
 };
 
 pub struct Mtp;
@@ -85,7 +85,7 @@ impl Feature for Mtp {
                 .push("the model already has an MTP head; this would retrain or replace it".into());
         }
         if p.depth != 1 {
-            c.warnings.push(format!("depth {}: the Qwen3.8 base ships one MTP layer; deeper heads must be trained fresh", p.depth));
+            c.warnings.push(format!("depth {}: only depth-1 heads can be ported or run by llama.cpp today; deeper heads must be trained fresh", p.depth));
         }
         if global_attention_layers(ctx.ir).is_empty() {
             c.blockers
@@ -150,13 +150,16 @@ impl Feature for Mtp {
                 if ported { "realign the ported" } else { "train a fresh" }
             ),
             trainable_params: n_head,
-            // Gradients stop at the head: the trunk only runs forward.
-            backprop_params: n_head,
+            // Gradients stop at the head, but flow through the frozen LM head
+            // (the loss is on its logits). The trunk only runs forward.
+            backprop_params: n_head + ctx.ir.vocab_size.unwrap_or(0) * ctx.ir.hidden_size.unwrap_or(0),
             tokens,
             seq_len: 4096,
             loss: "cross-entropy on token t+2 from the trunk's hidden state at t and the embedding of t+1".into(),
             data: "the target model's own generations (self-distillation), so drafts match what verification accepts; prompts from chat, code and reasoning sets".into(),
             teacher_forward: false,
+            trunk: TrunkUse::Frozen,
+            precomputed_features: true,
         }];
         Ok(Estimate {
             effects,
@@ -164,7 +167,7 @@ impl Feature for Mtp {
             risk: QualityRisk {
                 level: RiskLevel::Low,
                 expected: "No change to outputs: speculative verification is exact. The only risk is a smaller speedup than hoped.".into(),
-                recovery: "More alignment tokens, or a DSpark-style multi-block drafter.".into(),
+                recovery: "More alignment tokens, data closer to the served traffic, or a larger multi-block drafter.".into(),
             },
             assumptions: vec![
                 format!(
@@ -173,13 +176,13 @@ impl Feature for Mtp {
                     gib(n_head as f64 * 2.0)
                 ),
                 "Token budgets are heuristics; EAGLE-style draft heads are typically trained on well under 1B tokens.".into(),
-                "Reference speedup: PrismML's DSpark drafter for 1-bit Bonsai 27B accepts τ≈3.6 tokens at k=4, a 1.37× decode speedup on H100, and is not a net win on Apple Silicon at batch 1 (model card). An MTP head is a different drafter.".into(),
-                "Measured (docs/research/mtp-port.md): Qwen3.8's head ported to Ternary-Bonsai-2-27B with no training accepted 64% of drafts (44–84% across 4 prompts) for a 1.37–2.07× decode speedup on a 4-core CPU; a control without the norm conversion accepted 0%. GPU speedups are not measured.".into(),
+                "Speedup depends on acceptance and on the runtime's draft overhead; measure it with `modelbuilder_train bench-draft` on the deployment hardware rather than trusting this estimate.".into(),
+                "Frozen-trunk stages can precompute trunk features once (the trunk forward then runs at inference speed in the serving runtime, not in training).".into(),
             ],
             confidence: if ported { Confidence::Medium } else { Confidence::Low },
             references: vec![
-                "Qwen/Qwen3.8-27B config.json (mtp_num_hidden_layers = 1) and model.safetensors.index.json (mtp.* tensors)".into(),
-                "PrismML-Eng/llama.cpp: src/models/qwen35.cpp (nextn loader), conversion/qwen.py (mtp.* remap), common/speculative.cpp (draft-mtp)".into(),
+                "llama.cpp: nextn tensors in the model loaders, common/speculative.cpp (--spec-type draft-mtp)".into(),
+                "EAGLE (Li et al., 2024): draft heads on the target's features, trained with the target frozen".into(),
                 "DeepSeek-V3 technical report (MTP modules)".into(),
             ],
         })

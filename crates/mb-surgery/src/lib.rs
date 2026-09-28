@@ -4,9 +4,12 @@
 //! maps of the source checkpoints; only small transformed tensors (norms)
 //! are materialized.
 
+pub mod arch;
 pub mod export;
+pub mod gguf_edit;
 pub mod hf_export;
 pub mod mtp;
+pub mod replace;
 
 use std::path::PathBuf;
 
@@ -55,12 +58,7 @@ pub struct SurgeryReport {
 
 /// Round-to-nearest-even conversion from `f32` to BF16 bits.
 pub fn f32_to_bf16(x: f32) -> u16 {
-    let bits = x.to_bits();
-    if x.is_nan() {
-        return ((bits >> 16) as u16) | 0x0040; // keep it a (quiet) NaN
-    }
-    let round = 0x7fff + ((bits >> 16) & 1);
-    (bits.wrapping_add(round) >> 16) as u16
+    mb_formats::quant::f32_to_bf16(x)
 }
 
 #[cfg(test)]

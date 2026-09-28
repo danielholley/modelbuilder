@@ -41,7 +41,12 @@ peak_gib_per_gpu: number,
 /**
  * Same, if the frozen trunk stays packed at the source bit width.
  */
-peak_gib_per_gpu_packed_trunk: number, fits: Fit, notes: Array<string>, };
+peak_gib_per_gpu_packed_trunk: number, 
+/**
+ * GPU-hours to compute precomputed features (one trunk forward per token),
+ * separate from training; `None` when no stage precomputes.
+ */
+extraction_gpu_hours: Range | null, fits: Fit, notes: Array<string>, };
 
 export type Confidence = "low" | "medium" | "high";
 
@@ -299,7 +304,7 @@ export type ParamBreakdown = { total: number, embedding: number, lm_head: number
  */
 active_per_token: number, };
 
-export type Plan = { model: string, hardware: Array<HardwareProfile>, features: Array<FeaturePlan>, cost_model_assumptions: Array<string>, };
+export type Plan = { model: string, hardware: Array<HardwareProfile>, features: Array<FeaturePlan>, schedule: Schedule, cost_model_assumptions: Array<string>, };
 
 export type PlanRequest = { 
 /**
@@ -367,6 +372,28 @@ export type Report = { source: SourceSummary, architecture: ArchSummary, params:
 
 export type RiskLevel = "low" | "medium" | "high";
 
+/**
+ * All compatible features' stages in dependency order, with totals per profile.
+ */
+export type Schedule = { stages: Array<ScheduledStage>, 
+/**
+ * The whole schedule priced per hardware profile (the peak is the largest stage's).
+ */
+totals: Array<ComputeEstimate>, notes: Array<string>, };
+
+/**
+ * One stage in the order the whole plan should run.
+ */
+export type ScheduledStage = { 
+/**
+ * 1-based position.
+ */
+order: number, feature: string, stage: string, trunk: TrunkUse, 
+/**
+ * Why it runs at this position.
+ */
+reason: string, };
+
 export type SignMode = "identity" | "explicit";
 
 export type SourceFormat = "hf_safetensors" | "gguf";
@@ -403,7 +430,14 @@ tokens: Range, seq_len: number, loss: string, data: string,
 /**
  * Whether a teacher forward pass (the unmodified model) runs per token.
  */
-teacher_forward: boolean, };
+teacher_forward: boolean, trunk: TrunkUse, 
+/**
+ * For frozen stages: the trunk's outputs are computed once beforehand
+ * (in the serving runtime) and stored, so training never runs or holds
+ * the trunk. Only the embedding and the tensors it backpropagates
+ * through stay resident.
+ */
+precomputed_features: boolean, };
 
 export type StatsRequest = { path: string, 
 /**
@@ -470,6 +504,12 @@ channel_outlier_ratio: number | null, zero_fraction: number,
  * Fraction of 128-wide row groups whose nonzero values share one magnitude.
  */
 ternary_group_fraction: number | null, };
+
+/**
+ * How a stage uses the trunk. It decides the order stages run in: a stage
+ * trained against the trunk is invalidated by any later change to it.
+ */
+export type TrunkUse = "restructure" | "adapt" | "frozen";
 
 /**
  * An orthogonal rotation folded into the stored weights. Surgery has to keep
