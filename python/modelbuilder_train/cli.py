@@ -86,7 +86,10 @@ def _ints(s: str) -> list[int]:
 
 def _needle_progress(t) -> None:
     status = "found" if t.found else "MISSED"
-    print(f"{t.context_tokens:>7} tokens, depth {t.depth:.2f}: {status} ({t.answer!r})", file=sys.stderr)
+    print(
+        f"{t.context_tokens:>7} tokens, depth {t.depth:.2f}: {status}, code {t.expected} ({t.answer!r})",
+        file=sys.stderr,
+    )
 
 
 def _sweep_progress(row: dict) -> None:

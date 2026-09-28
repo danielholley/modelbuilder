@@ -81,6 +81,7 @@ class NeedleTrial:
     depth: float
     found: bool
     answer: str
+    expected: str = ""
 
 
 @dataclass
@@ -107,6 +108,7 @@ def needle(
     cache_type_v: str = "f16",
     progress=None,
     answer_prefix: str = "The secret code is",
+    n_predict: int = 64,
 ) -> NeedleResult:
     """Hides ``The secret code is NNNNNN.`` at each depth of each context length and asks for it.
 
@@ -116,7 +118,9 @@ def needle(
 
     The reply is started with ``answer_prefix``, so the model continues
     straight into the number. Otherwise reasoning models spend the token
-    budget on a preamble and every trial reads as a miss.
+    budget on a preamble and every trial reads as a miss. Reasoning models
+    may still restate the question first, so ``n_predict`` leaves room for
+    that, and the whole reply is searched for the code.
     """
     rng = random.Random(seed)
     unit = server.tokenize(filler)
@@ -130,8 +134,8 @@ def needle(
             doc.insert(round(d * len(doc)), f"The secret code is {code}. ")
             question = "What is the secret code mentioned in the text? Answer with the number only."
             prompt = server.apply_template([{"role": "user", "content": "".join(doc) + "\n\n" + question}])
-            answer = server.complete(prompt + answer_prefix, n_predict=16, temperature=0.0, seed=seed)
-            trial = NeedleTrial(n, d, code in answer, answer.strip()[:80])
+            answer = server.complete(prompt + answer_prefix, n_predict=n_predict, temperature=0.0, seed=seed)
+            trial = NeedleTrial(n, d, code in answer, answer.strip()[:120], code)
             res.trials.append(trial)
             if progress:
                 progress(trial)
