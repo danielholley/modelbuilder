@@ -76,6 +76,75 @@ def cmd_bench(args: argparse.Namespace) -> int:
     return 0
 
 
+def _floats(s: str) -> list[float]:
+    return [float(x) for x in s.split(",") if x]
+
+
+def _ints(s: str) -> list[int]:
+    return [int(x) for x in s.split(",") if x]
+
+
+def _needle_progress(t) -> None:
+    status = "found" if t.found else "MISSED"
+    print(f"{t.context_tokens:>7} tokens, depth {t.depth:.2f}: {status} ({t.answer!r})", file=sys.stderr)
+
+
+def _sweep_progress(row: dict) -> None:
+    print(f"{row['type']}: ppl {row.get('ppl')}, retrieval {row.get('needle_accuracy')}", file=sys.stderr)
+
+
+def cmd_probe(args: argparse.Namespace) -> int:
+    from dataclasses import asdict
+
+    from modelbuilder_train import probes
+
+    if args.probe == "perplexity":
+        if args.hf:
+            report = probes.perplexity_hf(Path(args.hf), Path(args.text).read_text(), ctx=args.ctx, device=args.device)
+        else:
+            report = asdict(
+                probes.perplexity_llamacpp(
+                    Path(args.llama_bin), Path(args.model), Path(args.text), ctx=args.ctx, chunks=args.chunks,
+                    cache_type_k=args.cache_type_k, cache_type_v=args.cache_type_v,
+                    threads=args.threads, gpu_layers=args.gpu_layers,
+                )
+            )  # fmt: skip
+        print(f"perplexity {report['ppl']:.4f}")
+    elif args.probe == "needle":
+        from modelbuilder_train.server import Server
+
+        extra = ["-ctk", args.cache_type_k, "-ctv", args.cache_type_v]
+        if args.cache_type_v not in ("f16", "f32", "bf16"):
+            extra += ["-fa", "on"]
+        lengths = _ints(args.lengths)
+        with Server.launch(
+            Path(args.llama_bin), Path(args.model), port=args.port, parallel=1, ctx=max(lengths) + 256,
+            threads=args.threads, gpu_layers=args.gpu_layers, extra=extra,
+        ) as s:  # fmt: skip
+            r = probes.needle(s, lengths=lengths, depths=_floats(args.depths), model=args.model,
+                              cache_type_k=args.cache_type_k, cache_type_v=args.cache_type_v,
+                              progress=_needle_progress)  # fmt: skip
+        report = {"model": r.model, "accuracy": r.accuracy, "trials": [asdict(t) for t in r.trials]}
+        print(f"retrieval accuracy {100 * r.accuracy:.1f}% over {len(r.trials)} trials")
+    else:  # kv-cache
+        report = probes.kv_cache_sweep(
+            Path(args.llama_bin), Path(args.model), types=args.types.split(","),
+            text=Path(args.text) if args.text else None, ctx=args.ctx, chunks=args.chunks,
+            needle_lengths=_ints(args.lengths) if args.lengths else None, needle_depths=_floats(args.depths),
+            threads=args.threads, gpu_layers=args.gpu_layers,
+            progress=_sweep_progress,
+        )  # fmt: skip
+        print(f"{'cache':<8}{'ppl':>10}{'Δ ppl':>9}{'needle':>9}")
+        for r in report["summary"]:
+            ppl = f"{r['ppl']:.3f}" if r["ppl"] is not None else "–"
+            delta = f"{r['ppl_delta_pct']:+.2f}%" if r["ppl_delta_pct"] is not None else "–"
+            nd = f"{100 * r['needle_accuracy']:.0f}%" if r["needle_accuracy"] is not None else "–"
+            print(f"{r['type']:<8}{ppl:>10}{delta:>9}{nd:>9}")
+    if args.out:
+        Path(args.out).write_text(json.dumps(report, indent=2) + "\n")
+    return 0
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     spec = JobSpec.load(args.spec)
     print(f"ok: {spec.job_id}, {len(spec.stages)} stage(s)")
@@ -274,6 +343,40 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--no-baseline", action="store_true", help="skip the plain (no drafting) runs")
     b.add_argument("--out", help="write all results as JSON")
     b.set_defaults(fn=cmd_bench)
+
+    pr = sub.add_parser("probe", help="measure quality: perplexity, long-context retrieval, KV cache types")
+    psub = pr.add_subparsers(dest="probe", required=True)
+
+    def probe_common(q: argparse.ArgumentParser) -> None:
+        q.add_argument("--llama-bin", help="directory with llama-perplexity / llama-server")
+        q.add_argument("--model", help="GGUF to probe")
+        q.add_argument("--threads", type=int)
+        q.add_argument("--gpu-layers", type=int)
+        q.add_argument("--ctx", type=int, default=2048)
+        q.add_argument("--chunks", type=int, default=20, help="perplexity: chunks of --ctx tokens to score")
+        q.add_argument("--out", help="write the report as JSON")
+        q.set_defaults(fn=cmd_probe)
+
+    q = psub.add_parser("perplexity", help="perplexity on a text file (GGUF via llama.cpp, or --hf in PyTorch)")
+    q.add_argument("--text", required=True, help="plain-text file")
+    q.add_argument("--hf", help="an HF model directory instead of --model")
+    q.add_argument("--device", default="auto")
+    q.add_argument("--cache-type-k", default="f16")
+    q.add_argument("--cache-type-v", default="f16")
+    probe_common(q)
+    q = psub.add_parser("needle", help="long-context retrieval of a hidden fact at several depths")
+    q.add_argument("--lengths", default="1024,4096,16384", help="context lengths in tokens")
+    q.add_argument("--depths", default="0.1,0.5,0.9")
+    q.add_argument("--cache-type-k", default="f16")
+    q.add_argument("--cache-type-v", default="f16")
+    q.add_argument("--port", type=int, default=8093)
+    probe_common(q)
+    q = psub.add_parser("kv-cache", help="perplexity and retrieval per KV cache type, vs f16")
+    q.add_argument("--types", default="q8_0,q4_0", help="llama.cpp cache types, e.g. q8_0,q5_0,q4_0")
+    q.add_argument("--text", help="plain-text file for perplexity")
+    q.add_argument("--lengths", help="needle context lengths (omit to skip retrieval)")
+    q.add_argument("--depths", default="0.1,0.5,0.9")
+    probe_common(q)
 
     args = p.parse_args(argv)
     return args.fn(args)
