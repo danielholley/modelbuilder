@@ -14,6 +14,9 @@
 //!   grouped to tiled order when there are fewer key heads than value heads
 //!   (`Qwen3NextModel.modify_tensors`, `_LinearAttentionVReorderBase`).
 //!
+//! - `qwen3moe`, and `llama` with routed experts (Mixtral): stacked
+//!   `ffn_*_exps` tensors become one HF tensor per expert ([`to_hf_all`]).
+//!
 //! Adding an architecture means adding an [`Adapter`] and, if it transforms
 //! tensors in new ways, a case in [`to_hf`]; the round-trip tests cover each.
 
@@ -39,6 +42,67 @@ pub struct Adapter {
     pub gated_deltanet: bool,
     /// Supports an MTP ("nextn") block in llama.cpp's layout.
     pub nextn: bool,
+    /// The HF class for the routed-expert (MoE) form of this architecture.
+    pub moe: Option<MoeHf>,
+}
+
+/// How an HF MoE class names experts and configures routing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MoeStyle {
+    /// Mixtral: `block_sparse_moe.experts.{e}.w1/w3/w2`, `num_local_experts`,
+    /// top-k weights always renormalized.
+    Mixtral,
+    /// Qwen3-MoE: `mlp.experts.{e}.{gate,up,down}_proj`, `num_experts`,
+    /// renormalized when `norm_topk_prob` is set.
+    Qwen,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MoeHf {
+    pub hf_architecture: &'static str,
+    pub hf_model_type: &'static str,
+    pub style: MoeStyle,
+}
+
+impl MoeHf {
+    fn block(&self) -> &'static str {
+        match self.style {
+            MoeStyle::Mixtral => "block_sparse_moe",
+            MoeStyle::Qwen => "mlp",
+        }
+    }
+
+    /// HF name of expert projection `which` (`gate`, `up` or `down`).
+    fn proj(&self, which: &str) -> &'static str {
+        match (self.style, which) {
+            (MoeStyle::Mixtral, "gate") => "w1",
+            (MoeStyle::Mixtral, "up") => "w3",
+            (MoeStyle::Mixtral, _) => "w2",
+            (MoeStyle::Qwen, "gate") => "gate_proj",
+            (MoeStyle::Qwen, "up") => "up_proj",
+            (MoeStyle::Qwen, _) => "down_proj",
+        }
+    }
+
+    /// Routing keys for the HF config.
+    pub fn config(&self, experts: u64, top_k: u64, expert_ff: u64) -> Vec<(&'static str, Value)> {
+        match self.style {
+            MoeStyle::Mixtral => vec![
+                ("num_local_experts", experts.into()),
+                ("num_experts_per_tok", top_k.into()),
+                ("intermediate_size", expert_ff.into()),
+            ],
+            MoeStyle::Qwen => vec![
+                ("num_experts", experts.into()),
+                ("num_experts_per_tok", top_k.into()),
+                ("moe_intermediate_size", expert_ff.into()),
+                // llama.cpp's qwen3moe graph renormalizes the top-k weights.
+                ("norm_topk_prob", true.into()),
+                ("decoder_sparse_step", 1.into()),
+                ("mlp_only_layers", Value::Array(vec![])),
+            ],
+        }
+    }
 }
 
 pub const ADAPTERS: &[Adapter] = &[
@@ -51,6 +115,11 @@ pub const ADAPTERS: &[Adapter] = &[
         post_attn_norm: "ffn_norm",
         gated_deltanet: false,
         nextn: false,
+        moe: Some(MoeHf {
+            hf_architecture: "MixtralForCausalLM",
+            hf_model_type: "mixtral",
+            style: MoeStyle::Mixtral,
+        }),
     },
     Adapter {
         gguf_archs: &["qwen2"],
@@ -61,6 +130,7 @@ pub const ADAPTERS: &[Adapter] = &[
         post_attn_norm: "ffn_norm",
         gated_deltanet: false,
         nextn: false,
+        moe: None,
     },
     Adapter {
         gguf_archs: &["qwen3"],
@@ -71,6 +141,7 @@ pub const ADAPTERS: &[Adapter] = &[
         post_attn_norm: "ffn_norm",
         gated_deltanet: false,
         nextn: false,
+        moe: None,
     },
     Adapter {
         gguf_archs: &["qwen35"],
@@ -81,6 +152,22 @@ pub const ADAPTERS: &[Adapter] = &[
         post_attn_norm: "post_attention_norm",
         gated_deltanet: true,
         nextn: true,
+        moe: None,
+    },
+    Adapter {
+        gguf_archs: &["qwen3moe"],
+        hf_architecture: "Qwen3MoeForCausalLM",
+        hf_model_type: "qwen3_moe",
+        norm_offset: false,
+        rope_permute: false,
+        post_attn_norm: "ffn_norm",
+        gated_deltanet: false,
+        nextn: false,
+        moe: Some(MoeHf {
+            hf_architecture: "Qwen3MoeForCausalLM",
+            hf_model_type: "qwen3_moe",
+            style: MoeStyle::Qwen,
+        }),
     },
 ];
 
@@ -371,6 +458,67 @@ pub fn to_hf(
     m.hf_name = format!("model.layers.{layer}.{hf}");
     m.elem = elem;
     Ok(Some(m))
+}
+
+/// [`to_hf`], plus routed experts: a stacked `ffn_{gate,up,down}_exps`
+/// tensor `[E, rows, cols]` becomes E HF tensors (each a contiguous run of
+/// source rows) and `ffn_gate_inp` the router.
+pub fn to_hf_all(
+    a: &Adapter,
+    d: &Dims,
+    name: &str,
+    shape: &[u64],
+    grouped_out: bool,
+) -> Result<Vec<Mapping>, SurgeryError> {
+    let expert = name.strip_prefix("blk.").and_then(|rest| {
+        let (idx, suffix) = rest.split_once('.')?;
+        let which = match suffix {
+            "ffn_gate_exps.weight" => "gate",
+            "ffn_up_exps.weight" => "up",
+            "ffn_down_exps.weight" => "down",
+            "ffn_gate_inp.weight" => "router",
+            _ => return None,
+        };
+        Some((idx.parse::<u32>().ok()?, which))
+    });
+    let Some((layer, which)) = expert else {
+        return Ok(to_hf(a, d, name, shape, grouped_out)?.into_iter().collect());
+    };
+    let moe = a.moe.ok_or_else(|| {
+        SurgeryError::Unsupported(format!("{name}: no MoE HF class for {}", a.gguf_archs[0]))
+    })?;
+    let base = format!("model.layers.{layer}.{}", moe.block());
+    let mapping = |hf_name: String, hf_shape: Vec<u64>, rows| Mapping {
+        hf_name,
+        layer: Some(layer),
+        hf_shape,
+        rows,
+        cols: None,
+        elem: Elem::Copy,
+        note: "",
+    };
+    if which == "router" {
+        return Ok(vec![mapping(
+            format!("{base}.gate.weight"),
+            shape.to_vec(),
+            None,
+        )]);
+    }
+    let [e, r, c] = shape[..] else {
+        return Err(SurgeryError::Incompatible(format!(
+            "{name}: expected [experts, rows, cols], found {shape:?}"
+        )));
+    };
+    let r = r as usize;
+    Ok((0..e as usize)
+        .map(|i| {
+            mapping(
+                format!("{base}.experts.{i}.{}.weight", moe.proj(which)),
+                vec![r as u64, c],
+                Some((i * r..(i + 1) * r).collect()),
+            )
+        })
+        .collect())
 }
 
 /// The MTP ("nextn") block's tensors in llama.cpp's layout, for adapters with

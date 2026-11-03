@@ -116,7 +116,12 @@ fn write_mapped(
 ) -> Result<(), SurgeryError> {
     let t = m.src;
     let width = *t.shape.last().unwrap_or(&1) as usize;
-    let rows = (t.n_elements() as usize) / width.max(1);
+    // Output rows: the gather's length (e.g. one expert of a stacked tensor), or every source row.
+    let rows = m
+        .map
+        .rows
+        .as_ref()
+        .map_or((t.n_elements() as usize) / width.max(1), Vec::len);
     let per_chunk = (CHUNK_ELEMS / width.max(1)).max(1);
     let mut buf = Vec::new();
     let mut row = vec![0f32; width];
@@ -195,6 +200,23 @@ fn prune_config(cfg: &mut Value, a: usize, b: usize) {
         }
     }
     o.insert("num_hidden_layers".into(), json!(n as usize - (b - a)));
+}
+
+/// `(expert_count, expert_used_count, expert FFN width)` when the GGUF has
+/// routed experts.
+fn experts(ir: &ModelIr) -> Option<(u64, u64, u64)> {
+    let mb_ir::Metadata::Gguf { kv, .. } = &ir.raw.metadata else {
+        return None;
+    };
+    let arch = ir.family.as_deref()?;
+    let get = |k: &str| {
+        kv.iter()
+            .find(|(x, _)| *x == format!("{arch}.{k}"))
+            .and_then(|(_, v)| v.as_u64())
+    };
+    let n = get("expert_count").filter(|&n| n > 0)?;
+    let ff = get("expert_feed_forward_length").or_else(|| get("feed_forward_length"))?;
+    Some((n, get("expert_used_count")?, ff))
 }
 
 /// YaRN scaling set in the GGUF (e.g. by `surgery yarn`): `(factor,
@@ -341,28 +363,27 @@ fn write_all(
     let mut mapped = Vec::new();
     for t in &ir.raw.tensors {
         let rotated = rotation.is_some_and(|r| r.is_rotated(&t.name));
-        let Some(map) = arch::to_hf(adapter, dims, &t.name, &t.shape, grouped_out)? else {
-            continue;
-        };
-        // Small F32 tensors (norms, gates, biases) stay F32.
-        let dtype = if t.dtype == DType::F32 {
-            DType::F32
-        } else {
-            opts.dtype
-        };
-        let m = Mapped {
-            src: t,
-            map,
-            dtype,
-            rotated,
-        };
-        let keep = match (m.map.layer, opts.layers) {
-            (None, _) => opts.globals,
-            (Some(_), None) => true,
-            (Some(l), Some((a, b))) => (a..b).contains(&l),
-        };
-        if keep {
-            mapped.push(m);
+        for map in arch::to_hf_all(adapter, dims, &t.name, &t.shape, grouped_out)? {
+            // Small F32 tensors (norms, gates, biases) stay F32.
+            let dtype = if t.dtype == DType::F32 {
+                DType::F32
+            } else {
+                opts.dtype
+            };
+            let m = Mapped {
+                src: t,
+                map,
+                dtype,
+                rotated,
+            };
+            let keep = match (m.map.layer, opts.layers) {
+                (None, _) => opts.globals,
+                (Some(_), None) => true,
+                (Some(l), Some((a, b))) => (a..b).contains(&l),
+            };
+            if keep {
+                mapped.push(m);
+            }
         }
     }
     if mapped.is_empty() {
@@ -478,6 +499,14 @@ fn write_all(
                 "bfloat16"
             }),
         );
+        // Routed experts (e.g. after `surgery upcycle`): the adapter's MoE class.
+        if let (Some(moe), Some((experts, top_k, ff))) = (adapter.moe, experts(ir)) {
+            o.insert("architectures".into(), json!([moe.hf_architecture]));
+            o.insert("model_type".into(), json!(moe.hf_model_type));
+            for (k, v) in moe.config(experts, top_k, ff) {
+                o.insert(k.into(), v);
+            }
+        }
         // An MTP block isn't exported; the reference's belongs to the reference.
         if o.contains_key("mtp_num_hidden_layers") {
             o.insert("mtp_num_hidden_layers".into(), json!(0));

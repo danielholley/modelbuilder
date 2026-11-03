@@ -286,6 +286,7 @@ enum FixtureKind {
     GgufHybridTernary,
     HybridMtpReference,
     GgufLlama,
+    GgufQwen3,
 }
 
 fn main() -> Result<()> {
@@ -665,6 +666,7 @@ fn main() -> Result<()> {
                 FixtureKind::GgufMixedQuant => mb_fixtures::gguf_mixed_quant(&out),
                 FixtureKind::GgufHybridTernary => mb_fixtures::gguf_hybrid_ternary(&out),
                 FixtureKind::GgufLlama => mb_fixtures::gguf_llama(&out),
+                FixtureKind::GgufQwen3 => mb_fixtures::gguf_qwen3(&out),
                 FixtureKind::HybridMtpReference => mb_fixtures::hybrid_mtp_reference(&out),
             };
             println!("{}", path.display());

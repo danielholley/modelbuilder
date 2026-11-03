@@ -37,8 +37,13 @@ speculative decoding and **DeepSeek-V4.1-Flash-style KV cache changes**.
   and rotated sources stay exact and `prism.hadamard.weight_names` is renamed
   to the expert tensors. Maps `llama` (Mixtral layout) and `qwen3` →
   `qwen3moe`; llama.cpp renormalizes top-k weights for both, so the result
-  computes the dense function until trained. `qwen35` is refused: its MoE
-  counterpart expects a shared expert, a layout not verified yet.
+  computes the dense function until trained. `export-hf` writes MoE GGUFs as
+  Mixtral or Qwen3-MoE checkpoints (one tensor per expert, routing config
+  with renormalized top-k): in transformers the upcycled model matches the
+  dense one exactly, and `trunk_distill` trains and writes back into it
+  (expert tensors themselves can't be written back yet). `qwen35` is
+  refused: its MoE counterpart expects a shared expert, a layout not
+  verified yet.
 - **`surgery mla`** (MHA2MLA, arXiv 2502.14837): partial RoPE per KV head
   (data-free `high` or `uniform` frequency choice) and a joint SVD of the
   RoPE-free K rows and V into a latent (`kv_a`, `kv_b`, `k_rope`), written to
@@ -119,7 +124,7 @@ python -m modelbuilder_train generate-corpus | extract-features | run | validate
 
 ### Test coverage
 
-104 Rust tests, 75 Python tests (including end-to-end runs through the Rust
+106 Rust tests, 78 Python tests (including end-to-end runs through the Rust
 binary on fixtures: MTP alignment, KV QAT, MLA recovery, healing a pruned
 model against its original, LoRA write-back, draft heads) and 7 web tests,
 all in CI. Every test uses tiny synthetic checkpoints; nothing downloads a
@@ -141,10 +146,10 @@ These need hardware, data or runtime code that isn't in this repository:
   - MLA outside DeepSeek's architecture: a converted model stays in HF form;
   - Medusa/EAGLE-1 heads in GGUF: the drafters are written as safetensors
     for runtimes that load them (e.g. vLLM).
-- **Runtime checks of `surgery upcycle`**: the structure is tested and
-  `inspect` reads it as MoE, but no llama.cpp run has compared the upcycled
-  model's logits with the dense one's yet. `qwen35` → `qwen35moe` needs the
-  shared-expert layout checked against the loader first.
+- **A llama.cpp check of `surgery upcycle`**: transformers' MoE classes give
+  the dense model's logits exactly, but no llama.cpp run has yet (building
+  llama.cpp wasn't possible in the session that wrote it). `qwen35` →
+  `qwen35moe` needs the shared-expert layout checked against the loader.
 - **DSpark drafters**: the paper describes the drafter but there is no
   public reference code to follow.
 - **MLA RoPE-dimension choice by query/key norms** (MHA2MLA's best variant)
@@ -159,8 +164,8 @@ These need hardware, data or runtime code that isn't in this repository:
 
 1. Run the real-model checks above on the cluster (item 6 and 8 of the
    revised order below).
-2. Verify `surgery upcycle` in llama.cpp on a small dense model (logits equal
-   to the dense model's before training), then check the `qwen35moe` loader.
+2. Run an upcycled fixture in llama.cpp (logits equal to the dense model's),
+   then check the `qwen35moe` loader.
 3. Try `trunk_distill --device-map auto` on a multi-GPU machine, and FSDP2
    for multi-node restructuring runs.
 

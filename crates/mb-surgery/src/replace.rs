@@ -88,7 +88,19 @@ pub fn replace_tensors(
     let mut written = Vec::new();
     for t in &target_ir.raw.tensors {
         let bytes = target.tensor_bytes(t)?;
-        let mapping = arch::to_hf(adapter, &dims, &t.name, &t.shape, grouped_out)?;
+        let mut all = arch::to_hf_all(adapter, &dims, &t.name, &t.shape, grouped_out)?;
+        let mapping = if all.len() > 1 {
+            // A stacked expert tensor: one HF tensor per expert.
+            if let Some(m) = all.iter().find(|m| updates.tensor(&m.hf_name).is_some()) {
+                return Err(SurgeryError::Unsupported(format!(
+                    "{} updates one expert of the stacked {}; writing experts back isn't supported yet",
+                    m.hf_name, t.name
+                )));
+            }
+            None
+        } else {
+            all.pop()
+        };
         let update = mapping
             .as_ref()
             .and_then(|m| updates.tensor(&m.hf_name).map(|u| (m, u)));

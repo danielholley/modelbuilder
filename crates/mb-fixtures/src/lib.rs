@@ -756,3 +756,83 @@ pub fn gguf_llama(dir: &Path) -> PathBuf {
     .unwrap();
     path
 }
+
+/// A dense `qwen3` GGUF (Q/K RMSNorm, Q8_0 weights, untied head) with its HF
+/// `config.json` beside it. For the qwen3 adapter and for upcycling to
+/// `qwen3moe`.
+pub fn gguf_qwen3(dir: &Path) -> PathBuf {
+    let (hidden, heads, kv, hd, inter, vocab, layers) =
+        (64u64, 4u64, 2u64, 16u64, 128u64, 96u64, 2u64);
+    let q8 = DType::Ggml(GgmlType(8));
+    let mut b = Builder::default();
+    b.add("token_embd.weight", DType::F16, &[vocab, hidden]);
+    for l in 0..layers {
+        let p = format!("blk.{l}");
+        b.add(format!("{p}.attn_norm.weight"), F32, &[hidden])
+            .add(format!("{p}.attn_q.weight"), q8, &[heads * hd, hidden])
+            .add(format!("{p}.attn_k.weight"), q8, &[kv * hd, hidden])
+            .add(format!("{p}.attn_v.weight"), q8, &[kv * hd, hidden])
+            .add(format!("{p}.attn_q_norm.weight"), F32, &[hd])
+            .add(format!("{p}.attn_k_norm.weight"), F32, &[hd])
+            .add(format!("{p}.attn_output.weight"), q8, &[hidden, heads * hd])
+            .add(format!("{p}.ffn_norm.weight"), F32, &[hidden])
+            .add(format!("{p}.ffn_gate.weight"), q8, &[inter, hidden])
+            .add(format!("{p}.ffn_up.weight"), q8, &[inter, hidden])
+            .add(format!("{p}.ffn_down.weight"), q8, &[hidden, inter]);
+    }
+    b.add("output_norm.weight", F32, &[hidden])
+        .add("output.weight", q8, &[vocab, hidden]);
+    let u32v = |v: u64| MetaValue::U32(v as u32);
+    let kv_pairs = vec![
+        (
+            "general.architecture".to_string(),
+            MetaValue::String("qwen3".into()),
+        ),
+        (
+            "general.name".to_string(),
+            MetaValue::String("Tiny Qwen3".into()),
+        ),
+        ("qwen3.block_count".to_string(), u32v(layers)),
+        ("qwen3.context_length".to_string(), u32v(4096)),
+        ("qwen3.embedding_length".to_string(), u32v(hidden)),
+        ("qwen3.feed_forward_length".to_string(), u32v(inter)),
+        ("qwen3.attention.head_count".to_string(), u32v(heads)),
+        ("qwen3.attention.head_count_kv".to_string(), u32v(kv)),
+        ("qwen3.attention.key_length".to_string(), u32v(hd)),
+        ("qwen3.attention.value_length".to_string(), u32v(hd)),
+        (
+            "qwen3.rope.freq_base".to_string(),
+            MetaValue::F32(1000000.0),
+        ),
+        (
+            "qwen3.attention.layer_norm_rms_epsilon".to_string(),
+            MetaValue::F32(1e-6),
+        ),
+        ("general.file_type".to_string(), u32v(7)),
+    ];
+    std::fs::create_dir_all(dir).unwrap();
+    let path = dir.join("tiny-qwen3.gguf");
+    gguf::write(&path, &kv_pairs, &b.materialize()).unwrap();
+    let cfg = json!({
+        "architectures": ["Qwen3ForCausalLM"],
+        "model_type": "qwen3",
+        "hidden_size": hidden,
+        "intermediate_size": inter,
+        "num_hidden_layers": layers,
+        "num_attention_heads": heads,
+        "num_key_value_heads": kv,
+        "head_dim": hd,
+        "vocab_size": vocab,
+        "max_position_embeddings": 4096,
+        "rms_norm_eps": 1e-6,
+        "rope_theta": 1000000.0,
+        "tie_word_embeddings": false,
+        "hidden_act": "silu"
+    });
+    std::fs::write(
+        dir.join("config.json"),
+        serde_json::to_string_pretty(&cfg).unwrap(),
+    )
+    .unwrap();
+    path
+}

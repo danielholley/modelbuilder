@@ -203,7 +203,7 @@ impl Feature for MoeUpcycle {
                 None,
                 format!("modelbuilder surgery upcycle {{model}} --experts {} --top-k {} -o {{run}}/{{stem}}-moe.gguf", p.experts, p.top_k),
                 crate::Produces::Gguf("{run}/{stem}-moe.gguf".into()),
-                "Exact copies: the upcycled model computes the dense model's function until it is trained. export-hf has no MoE adapter yet, so later trunk-distill steps can't start from it.",
+                "Exact copies: the upcycled model computes the dense model's function until it is trained (checked in transformers' Mixtral and Qwen3-MoE). export-hf and trunk-distill work on it; writing trained experts back isn't supported yet.",
             ),
             crate::RunStep::missing(
                 TrunkUse::Restructure,

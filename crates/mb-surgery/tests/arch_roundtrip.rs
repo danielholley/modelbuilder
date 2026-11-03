@@ -88,6 +88,69 @@ fn llama_round_trips_through_hf() {
 }
 
 #[test]
+fn qwen3_round_trips_through_hf() {
+    let dir = tempfile::tempdir().unwrap();
+    let gguf = mb_fixtures::gguf_qwen3(&dir.path().join("src"));
+    roundtrip(&gguf, &dir.path().join("src"), dir.path());
+}
+
+#[test]
+fn upcycled_experts_export_as_copies_of_the_dense_mlp() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    let (m, ir) = open(&mb_fixtures::gguf_qwen3(&src));
+    let moe = dir.path().join("moe.gguf");
+    let opts = mb_surgery::upcycle::UpcycleOptions {
+        experts: 3,
+        ..Default::default()
+    };
+    mb_surgery::upcycle::upcycle(&m, &ir, &opts, &moe).unwrap();
+    let export = |gguf: &Path, out: &str| {
+        let (g, gir) = open(gguf);
+        let hf = dir.path().join(out);
+        let o = HfExportOptions {
+            reference: src.clone(),
+            dtype: DType::F32,
+            shard_bytes: 1 << 30,
+            layers: None,
+            globals: true,
+            overwrite: false,
+        };
+        export_hf(&g, &gir, &hf, &o).unwrap();
+        open(&hf).0
+    };
+    let (dense, moe) = (export(&src.join("tiny-qwen3.gguf"), "d"), export(&moe, "m"));
+    let cfg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("m/config.json")).unwrap())
+            .unwrap();
+    assert_eq!(cfg["architectures"][0], "Qwen3MoeForCausalLM");
+    assert_eq!(
+        (cfg["num_experts"].as_u64(), cfg["norm_topk_prob"].as_bool()),
+        (Some(3), Some(true))
+    );
+    for l in 0..2 {
+        for p in ["gate_proj", "up_proj", "down_proj"] {
+            let d = dense
+                .tensor(&format!("model.layers.{l}.mlp.{p}.weight"))
+                .unwrap();
+            for e in 0..3 {
+                let x = moe
+                    .tensor(&format!("model.layers.{l}.mlp.experts.{e}.{p}.weight"))
+                    .unwrap();
+                assert_eq!(x.shape, d.shape);
+                assert_eq!(moe.tensor_bytes(x).unwrap(), dense.tensor_bytes(d).unwrap());
+            }
+        }
+        assert_eq!(
+            moe.tensor(&format!("model.layers.{l}.mlp.gate.weight"))
+                .unwrap()
+                .shape,
+            vec![3, 64]
+        );
+    }
+}
+
+#[test]
 fn hybrid_ternary_round_trips_through_hf() {
     // qwen35: V-head reorders, A_log, conv1d, zero-centered norms, Hadamard rotation, PQ2_0.
     let dir = tempfile::tempdir().unwrap();

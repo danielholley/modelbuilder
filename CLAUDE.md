@@ -83,7 +83,7 @@ cargo run --release -- job mtp-align <target.gguf> --from <hf-reference> --featu
 cargo run --release -- job run runs/<name>/job.json
 cargo run --release -- serve [--port 7878] [--web-dir web/dist]   # web dashboard + JSON API on localhost
 cargo run --release -- tui [<model>] [--job job.json | --events events.jsonl]
-cargo run -- fixture qwen-hybrid /tmp/qh   # hidden: writes a tiny test checkpoint
+cargo run -- fixture qwen-hybrid /tmp/qh   # hidden: writes a tiny test checkpoint (also gguf-llama, gguf-qwen3, ...)
 
 # Web UI (web/): once, then check, test, build (serve picks up web/dist)
 cd web && npm ci && npm run format:check && npm run typecheck && npm test && npm run build
