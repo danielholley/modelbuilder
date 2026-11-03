@@ -73,7 +73,11 @@ speculative decoding and **DeepSeek-V4.1-Flash-style KV cache changes**.
     merged tensor still writes back exactly;
   - `device_map`: the model and teacher spread layer by layer over one
     machine's GPUs (accelerate), for trunks that don't fit on one device.
-    Only the CPU path is tested here.
+    Only the CPU path is tested here;
+  - `shard = "fsdp"`: decoder layers sharded over `torchrun` processes
+    (FSDP2), on one or more machines; `--nproc-per-node` launches them
+    locally. Plain tensors only (no LoRA or weight fake-quant), so it pairs
+    with next-token loss or a separate teacher. Tested with two CPU ranks.
 
   `export-hf` writes a GGUF's YaRN scaling into the HF config, so a finetune
   after `surgery yarn` trains with the scaling transformers applies.
@@ -129,7 +133,7 @@ python -m modelbuilder_train generate-corpus | extract-features | run | validate
 
 ### Test coverage
 
-106 Rust tests, 79 Python tests (including end-to-end runs through the Rust
+106 Rust tests, 80 Python tests (including end-to-end runs through the Rust
 binary on fixtures: MTP alignment, KV QAT, MLA recovery, healing a pruned
 model against its original, LoRA write-back, draft heads) and 7 web tests,
 all in CI. Every test uses tiny synthetic checkpoints; nothing downloads a
@@ -157,11 +161,11 @@ These need hardware, data or runtime code that isn't in this repository:
   `qwen35moe` needs the shared-expert layout checked against the loader.
 - **DSpark drafters**: the paper describes the drafter but there is no
   public reference code to follow.
-- **Backends**: `mlx` runs `mtp_align` only (other stages use torch on MPS),
-  and there is no multi-node pretraining backend (`torchtitan`), which
-  continued pretraining at upcycling scale needs. The `hf` stage spreads a trunk over
-  one machine's GPUs (`device_map`, untested on real GPUs) or runs DDP with a
-  full copy per process; there is no FSDP across processes.
+- **Backends**: `mlx` runs `mtp_align` only (other stages use torch on MPS).
+  Multi-node training is FSDP2 over `torchrun` in the `hf` stage; tensor,
+  pipeline or context parallelism (a `torchtitan` backend) for continued
+  pretraining at upcycling scale doesn't exist. Neither `device_map` nor
+  FSDP has run on real GPUs yet.
 
 ## Next
 
@@ -169,8 +173,7 @@ These need hardware, data or runtime code that isn't in this repository:
    revised order below).
 2. Run an upcycled fixture in llama.cpp (logits equal to the dense model's),
    then check the `qwen35moe` loader.
-3. Try `trunk_distill --device-map auto` on a multi-GPU machine, and FSDP2
-   for multi-node restructuring runs.
+3. Run `trunk_distill --device-map auto` and `--shard fsdp` on real GPUs.
 
 ## Target hardware (the user's cluster)
 

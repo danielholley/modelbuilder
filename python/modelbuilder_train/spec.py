@@ -48,6 +48,7 @@ class TrunkDistill(_Strict):
     teacher: str | None = None
     loss: Literal["kl", "ce"] = "kl"
     device_map: Literal["auto", "balanced", "sequential"] | None = None
+    shard: Literal["fsdp"] | None = None
     lora_rank: int | None = Field(default=None, ge=1)
     lora_alpha: float | None = Field(default=None, gt=0)
     eval_fraction: float = Field(default=0.05, ge=0, le=0.5)

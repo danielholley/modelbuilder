@@ -46,6 +46,7 @@ fn trunk_distill_builder_matches_the_example_shape() {
         loss: mb_jobs::DistillLoss::Kl,
         lora_rank: None,
         device_map: None,
+        shard: None,
         hardware_profile: None,
         device: Device::Auto,
         hyper: Hyper::trunk_distill_default(),

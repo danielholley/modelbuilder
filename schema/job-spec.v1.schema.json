@@ -318,6 +318,13 @@
           ],
           "description": "Spread the model (and a teacher) layer by layer over this process's GPUs (transformers/accelerate device_map), for models that don't fit on one."
         },
+        "shard": {
+          "enum": [
+            "fsdp",
+            null
+          ],
+          "description": "Shard each decoder layer over the torchrun processes (FSDP2), on one or more machines. Needs loss ce or a separate teacher, no lora_rank, weight_fakequant false."
+        },
         "lora_rank": {
           "type": [
             "integer",

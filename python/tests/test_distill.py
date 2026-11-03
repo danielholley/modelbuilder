@@ -194,3 +194,37 @@ def test_device_map_path_with_a_teacher(tmp_path: Path) -> None:
     bad = mb("job", "trunk-distill", str(pruned), "--reference", str(target.parent), "--texts", str(texts),
              "--device-map", "everywhere", "-o", str(tmp_path / "bad"), "--emit-only", check=False)  # fmt: skip
     assert "device_map" in bad
+
+
+@pytest.mark.skipif(not BIN.exists(), reason=f"no modelbuilder binary at {BIN}")
+def test_fsdp_over_two_ranks(tmp_path: Path) -> None:
+    """Layers sharded over two CPU ranks (gloo): one event stream, it learns, and whole tensors write back."""
+    pytest.importorskip("transformers")
+    target = Path(mb("fixture", "gguf-llama", str(tmp_path / "t")).strip())
+    texts = tmp_path / "t.jsonl"
+    texts.write_text(
+        "".join(json.dumps({"tokens": [(5 * i + 3 * j) % 96 for j in range(48)]}) + "\n" for i in range(8))
+    )
+    run = tmp_path / "run"
+    out = mb(
+        "job", "trunk-distill", str(target), "--reference", str(target.parent), "--texts", str(texts),
+        "-o", str(run), "--loss", "ce", "--trainable", "mlp.", "--no-weight-fakequant", "--shard", "fsdp",
+        "--nproc-per-node", "2", "--steps", "8", "--seq-len", "32", "--batch-seqs", "2", "--lr", "3e-3",
+        "--eval-every", "8", "--log-every", "4", "--device", "cpu", "--fp32", "--max-rel-error", "0.05",
+        "--raw-events", "--python", sys.executable,
+    )  # fmt: skip
+    events = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
+    kinds = [e["event"] for e in events]
+    assert kinds.count("started") == 1 and kinds.count("finished") == 1, kinds
+    evals = [e for e in events if e["event"] == "eval"]
+    assert evals[-1]["loss"] < evals[0]["loss"], evals
+    assert json.loads((run / "job.json").read_text())["stages"][0]["trunk_distill"]["shard"] == "fsdp"
+    from safetensors import safe_open
+
+    with safe_open(str(run / "updates" / "model.safetensors"), "pt") as f:
+        shapes = {k: tuple(f.get_slice(k).get_shape()) for k in f.keys()}  # noqa: SIM118
+    assert shapes["model.layers.0.mlp.gate_proj.weight"] == (128, 64)  # whole, not a shard
+    assert (run / "t-finetune.gguf").exists() or (run / "tiny-llama-finetune.gguf").exists()
+    bad = mb("job", "trunk-distill", str(target), "--reference", str(target.parent), "--texts", str(texts),
+             "-o", str(tmp_path / "b"), "--shard", "fsdp", "--emit-only", check=False)  # fmt: skip
+    assert "fsdp" in bad

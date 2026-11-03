@@ -40,6 +40,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.distributed.tensor import DTensor
 from torch.nn.utils import parametrize
 
 from modelbuilder_train import dist
@@ -196,6 +197,14 @@ def run_trunk_distill(
     if stage.weight_fakequant and (model_dir / MANIFEST).exists():
         formats = fakequant.load_manifest(model_dir / MANIFEST)
 
+    fsdp = stage.shard == "fsdp"
+    if fsdp:
+        if stage.loss == "kl" and not stage.teacher:
+            raise ValueError("shard fsdp needs loss ce or a separate teacher (the built-in teacher switches weights)")
+        if stage.lora_rank:
+            raise ValueError("shard fsdp trains the tensors themselves: drop lora_rank")
+        if formats:
+            raise ValueError("shard fsdp trains plain tensors: set weight_fakequant false")
     mode = Mode()
     mla_cfg = mla.load_config(model_dir)
     if mla_cfg is not None:
@@ -207,6 +216,10 @@ def run_trunk_distill(
         for pname, p in list(mod.named_parameters(recurse=False)):
             full = f"{mod_name}.{pname}" if mod_name else pname
             if not any(pat in full for pat in stage.trainable):
+                continue
+            if fsdp:  # plain parameters: FSDP shards them
+                p.requires_grad_(True)
+                trainable[full] = p
                 continue
             fmt = formats.get(full)
             if fmt is None and formats:
@@ -229,6 +242,18 @@ def run_trunk_distill(
             trainable[full] = plist.original
     if not trainable:
         raise ValueError(f"no parameter name contains any of {stage.trainable}")
+    if fsdp:
+        # Each decoder layer is sharded over the ranks; the embedding, final
+        # norm and LM head stay whole on every rank (they run outside the
+        # decoder's forward here, for the chunked loss).
+        from torch.distributed.fsdp import fully_shard
+
+        for m in [model, teacher] if teacher is not None else [model]:
+            for layer in m.get_decoder().layers:
+                fully_shard(layer)
+        # fully_shard replaces parameters with sharded ones: collect them again.
+        named = dict(model.named_parameters())
+        trainable = {k: named[k] for k in trainable}
     # What the optimizer updates: the tensors themselves, or their LoRA factors.
     params = lora_params + [p for p in trainable.values() if p.requires_grad]
 
@@ -285,8 +310,16 @@ def run_trunk_distill(
         eval_tokens=sum(len(s) for s in held),
     )
     opt = torch.optim.AdamW(params, lr=hyper.lr, weight_decay=hyper.weight_decay)
-    if held and dist.is_main():
-        ev.emit("eval", step=0, **evaluate())
+    # Under FSDP every rank takes part in each forward pass, evaluation too.
+    evaluating = held and (fsdp or dist.is_main())
+
+    def emit_eval(step: int) -> None:
+        r = evaluate()
+        if dist.is_main():
+            ev.emit("eval", step=step, **r)
+
+    if evaluating:
+        emit_eval(0)
     tokens_seen, t0 = 0, time.time()
     for step in range(1, hyper.steps + 1):
         lr = lr_at(step - 1, hyper)
@@ -302,7 +335,7 @@ def run_trunk_distill(
             kl_total, agree_total = kl_total + float(k.detach()), agree_total + a
         if dist.world() > 1:
             for p in params:
-                if p.grad is not None:
+                if p.grad is not None and not isinstance(p.grad, DTensor):  # FSDP reduces its own
                     torch.distributed.all_reduce(p.grad)
                     p.grad /= dist.world()
         if hyper.grad_clip:
@@ -320,20 +353,23 @@ def run_trunk_distill(
                 lr=lr,
                 tokens_per_s=tokens_seen / max(time.time() - t0, 1e-9),
             )
-        if held and dist.is_main() and (step % hyper.eval_every == 0 or step == hyper.steps):
-            ev.emit("eval", step=step, **evaluate())
+        if evaluating and (step % hyper.eval_every == 0 or step == hyper.steps):
+            emit_eval(step)
 
     out = out_dir / "updates"
+    mode.student = True
+    tensors = {}
+    for full in trainable:
+        mod_name, _, pname = full.rpartition(".")
+        mod = model.get_submodule(mod_name) if mod_name else model
+        v = getattr(mod, pname).detach()  # the student's (fake-quantized) value
+        if isinstance(v, DTensor):
+            v = v.full_tensor()  # a collective: every rank gathers
+        tensors[full] = v.float().contiguous()
     if dist.is_main():
         from safetensors.torch import save_file
 
         out.mkdir(parents=True, exist_ok=True)
-        mode.student = True
-        tensors = {}
-        for full in trainable:
-            mod_name, _, pname = full.rpartition(".")
-            mod = model.get_submodule(mod_name) if mod_name else model
-            tensors[full] = getattr(mod, pname).detach().float().contiguous()  # the student's (fake-quantized) value
         tensors = {k: v.contiguous() for k, v in checkpoint_names(model, tensors).items()}
         save_file(tensors, str(out / "model.safetensors"), metadata={"format": "pt", "modelbuilder": "trunk-distill"})
         for f in ("config.json", MANIFEST):

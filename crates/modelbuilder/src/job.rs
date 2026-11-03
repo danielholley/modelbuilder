@@ -47,6 +47,10 @@ pub struct PythonArgs {
     /// Print raw JSONL events instead of the rendered view.
     #[arg(long)]
     raw_events: bool,
+    /// Processes on this machine (one per GPU) under torchrun: DDP, or FSDP
+    /// for `--shard fsdp`. Multi-machine runs: `torchrun ... -m modelbuilder_train run job.json`.
+    #[arg(long, default_value_t = 1)]
+    nproc_per_node: u32,
 }
 
 #[derive(Args)]
@@ -147,6 +151,10 @@ pub struct TrunkDistillArgs {
     /// GPUs: auto, balanced or sequential (one process; needs `accelerate`).
     #[arg(long)]
     device_map: Option<String>,
+    /// fsdp: shard each decoder layer over `--nproc-per-node` processes
+    /// (needs --loss ce or --teacher, and --no-weight-fakequant).
+    #[arg(long)]
+    shard: Option<String>,
     /// KV-cache format to train for: q8_0, q4_0 or nvfp4.
     #[arg(long)]
     kv_format: Option<String>,
@@ -591,6 +599,7 @@ fn trunk_distill(a: TrunkDistillArgs) -> Result<()> {
         loss,
         lora_rank: a.lora_rank,
         device_map: a.device_map,
+        shard: a.shard,
         hardware_profile: a.hardware,
         device: parse_device(&a.device)?,
         hyper,
@@ -729,9 +738,10 @@ fn draft_align(a: DraftAlignArgs) -> Result<()> {
 
 fn launch(spec: &Path, py: &PythonArgs) -> Result<std::collections::BTreeMap<String, String>> {
     let raw = py.raw_events;
-    let outputs = mb_jobs::run(
+    let outputs = mb_jobs::run_procs(
         spec,
         &py.python,
+        py.nproc_per_node,
         |rec| {
             if raw {
                 println!("{}", serde_json::to_string(rec).unwrap_or_default());

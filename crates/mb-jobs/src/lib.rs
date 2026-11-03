@@ -186,6 +186,9 @@ pub struct TrunkDistill {
     /// Spread the model over the process's GPUs: `auto`, `balanced` or `sequential`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_map: Option<String>,
+    /// `fsdp`: shard each decoder layer over the `torchrun` processes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard: Option<String>,
     /// Train a rank-r LoRA update of each trainable tensor (merged before write-back).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora_rank: Option<u32>,
@@ -356,6 +359,24 @@ impl JobSpec {
                             s.name
                         ));
                     }
+                    if let Some(sh) = t.shard.as_deref() {
+                        let why = if sh != "fsdp" {
+                            Some("shard must be fsdp")
+                        } else if t.lora_rank.is_some() {
+                            Some("shard fsdp trains the tensors themselves (no lora_rank)")
+                        } else if t.weight_fakequant {
+                            Some("shard fsdp trains plain tensors (weight_fakequant false)")
+                        } else if t.loss == DistillLoss::Kl && t.teacher.is_none() {
+                            Some("shard fsdp needs loss ce or a separate teacher")
+                        } else if t.device_map.is_some() {
+                            Some("shard fsdp and device_map exclude each other")
+                        } else {
+                            None
+                        };
+                        if let Some(w) = why {
+                            return bad(format!("stage {}: {w}", s.name));
+                        }
+                    }
                     if t.lora_rank == Some(0)
                         || t.lora_alpha.is_some_and(|a| a.is_nan() || a <= 0.0)
                     {
@@ -491,7 +512,24 @@ impl JobProcess {
     /// Like [`JobProcess::spawn`], with the child's stderr sent to `stderr`
     /// (e.g. [`Stdio::null`] under a full-screen terminal UI).
     pub fn spawn_with(spec_path: &Path, python: &str, stderr: Stdio) -> Result<Self, JobError> {
-        let mut child = Command::new(python)
+        Self::spawn_procs(spec_path, python, 1, stderr)
+    }
+
+    /// Like [`JobProcess::spawn_with`], with `nproc > 1` processes on this
+    /// machine under `torchrun` (`torch.distributed.run --standalone`): DDP,
+    /// or FSDP for stages with `shard = "fsdp"`. Rank 0 writes the events.
+    pub fn spawn_procs(
+        spec_path: &Path,
+        python: &str,
+        nproc: u32,
+        stderr: Stdio,
+    ) -> Result<Self, JobError> {
+        let mut cmd = Command::new(python);
+        if nproc > 1 {
+            cmd.args(["-m", "torch.distributed.run", "--standalone"])
+                .arg(format!("--nproc-per-node={nproc}"));
+        }
+        let mut child = cmd
             .args(["-m", "modelbuilder_train", "run"])
             .arg(spec_path)
             .stdout(Stdio::piped())
@@ -576,6 +614,17 @@ pub fn run(
     JobProcess::spawn(spec_path, python)?.drive(on_event, on_other)
 }
 
+/// [`run`] with `nproc` processes under `torchrun` ([`JobProcess::spawn_procs`]).
+pub fn run_procs(
+    spec_path: &Path,
+    python: &str,
+    nproc: u32,
+    on_event: impl FnMut(&EventRecord),
+    on_other: impl FnMut(&str),
+) -> Result<BTreeMap<String, String>, JobError> {
+    JobProcess::spawn_procs(spec_path, python, nproc, Stdio::inherit())?.drive(on_event, on_other)
+}
+
 /// Inputs for an `mtp_align` job.
 #[derive(Clone, Debug)]
 pub struct MtpAlignInputs {
@@ -656,6 +705,7 @@ pub struct TrunkDistillInputs {
     pub loss: DistillLoss,
     pub lora_rank: Option<u32>,
     pub device_map: Option<String>,
+    pub shard: Option<String>,
     pub hardware_profile: Option<String>,
     pub device: Device,
     pub hyper: Hyper,
@@ -704,6 +754,7 @@ pub fn trunk_distill_spec(i: TrunkDistillInputs) -> JobSpec {
                 teacher: i.teacher.as_deref().map(s),
                 loss: i.loss,
                 device_map: i.device_map,
+                shard: i.shard,
                 lora_rank: i.lora_rank,
                 lora_alpha: None,
                 eval_fraction: 0.05,

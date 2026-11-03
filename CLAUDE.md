@@ -215,12 +215,14 @@ TOML), Jobs (start or follow a job, live curves over SSE).
   attention implementation, MLA is switched in by hooks (`hf/mla.py`), and
   weights are fake-quantized through their source format, optionally as a
   LoRA update merged inside the parametrization (`hf/`). `device_map`
-  spreads the model (and a teacher) over one machine's GPUs; there is no
-  FSDP across processes yet.
+  spreads the model (and a teacher) over one machine's GPUs; `shard = "fsdp"`
+  shards decoder layers over `torchrun` processes on one or more machines
+  (FSDP2; plain tensors only, so next-token loss or a separate teacher).
 - `mlx` ✅ (partial): `mtp_align` with the head in MLX
   (`mtp/mlx_model.py`, `backends/mlx_backend.py`), checked against the
   PyTorch head. Other stages run on the `torch` backend (MPS on Apple GPUs).
-- `backends/torchtitan`: multi-node continued pretraining, planned.
+- `backends/torchtitan`: large-scale continued pretraining (tensor, pipeline
+  and context parallelism beyond FSDP), planned.
 
 The Python side also runs behavioral probes and evals.
 
