@@ -179,6 +179,20 @@ def cmd_probe(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_fetch(args: argparse.Namespace) -> int:
+    from modelbuilder_train.hub import fetch_tensors
+
+    total = [0]
+
+    def show(name: str, n: int) -> None:
+        total[0] += n
+        print(f"  {name}  ({total[0] / 2**20:.0f} MiB so far)", file=sys.stderr)
+
+    got = fetch_tensors(args.repo, args.pattern, Path(args.out), revision=args.revision, progress=show)
+    print(f"fetched {len(got)} tensors ({total[0] / 2**20:.0f} MiB) to {args.out}")
+    return 0
+
+
 def cmd_mla_scores(args: argparse.Namespace) -> int:
     from modelbuilder_train.hf.distill import load_sequences
     from modelbuilder_train.hf.mla import rope_scores
@@ -390,6 +404,13 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--no-baseline", action="store_true", help="skip the plain (no drafting) runs")
     b.add_argument("--out", help="write all results as JSON")
     b.set_defaults(fn=cmd_bench)
+
+    ft = sub.add_parser("fetch-tensors", help="download only the tensors matching a pattern from a Hugging Face model")
+    ft.add_argument("--repo", required=True, help="e.g. Qwen/Qwen3.8-27B")
+    ft.add_argument("--pattern", required=True, help=r"regex on tensor names, e.g. 'layers\.(0|1|2|3)\.'")
+    ft.add_argument("--out", required=True, help="directory: model.safetensors plus config and tokenizer files")
+    ft.add_argument("--revision", default="main")
+    ft.set_defaults(fn=cmd_fetch)
 
     ms = sub.add_parser("mla-rope-scores", help="rank RoPE frequencies by query/key norms (MHA2MLA S_2-norm)")
     ms.add_argument("--hf", required=True, help="HF model directory (e.g. from modelbuilder export-hf)")
