@@ -198,6 +198,32 @@ impl Feature for Yarn {
         ])
     }
 
+    fn pipeline(
+        &self,
+        _ctx: &Context,
+        params: &Params,
+    ) -> Result<Vec<crate::RunStep>, FeatureError> {
+        let p: P = parse_params(ID, params)?;
+        let orig = p
+            .original_context
+            .map_or(String::new(), |c| format!(" --original-context {c}"));
+        let mut v = vec![crate::RunStep::run(
+            TrunkUse::Restructure,
+            None,
+            format!("modelbuilder surgery yarn {{model}} --factor {}{orig} -o {{run}}/{{stem}}-yarn.gguf", p.factor),
+            crate::Produces::Gguf("{run}/{stem}-yarn.gguf".into()),
+            "Metadata only. Check retrieval at the new length with `modelbuilder_train probe needle`.",
+        )];
+        if p.finetune {
+            v.push(crate::RunStep::missing(
+                TrunkUse::Restructure,
+                "long-context",
+                "A long-context finetune needs long documents and a next-token (not distillation) stage, which modelbuilder doesn't have yet.",
+            ));
+        }
+        Ok(v)
+    }
+
     fn export_notes(&self, _ctx: &Context, _params: &Params) -> Result<Vec<String>, FeatureError> {
         Ok(vec![
             "llama.cpp, vLLM and transformers all implement YaRN from the metadata; no code changes.".into(),

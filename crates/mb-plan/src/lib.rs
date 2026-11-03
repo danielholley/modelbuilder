@@ -187,7 +187,129 @@ pub struct Plan {
     pub hardware: Vec<HardwareProfile>,
     pub features: Vec<FeaturePlan>,
     pub schedule: Schedule,
+    /// The commands that carry the plan out, in schedule order.
+    pub pipeline: Pipeline,
     pub cost_model_assumptions: Vec<String>,
+}
+
+/// One command of the [`Pipeline`].
+#[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct PipelineStep {
+    /// 1-based position.
+    pub order: usize,
+    pub feature: String,
+    /// The schedule stage this step trains, if any.
+    pub stage: Option<String>,
+    pub trunk: TrunkUse,
+    /// `None`: modelbuilder has no runner for this step yet. `<...>` marks
+    /// inputs to fill in.
+    pub command: Option<String>,
+    /// The model the step starts from.
+    pub model: String,
+    pub note: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct Pipeline {
+    pub steps: Vec<PipelineStep>,
+    /// The GGUF the last step leaves (the input model when nothing changes it).
+    pub final_model: String,
+    pub notes: Vec<String>,
+}
+
+fn file_stem(p: &str) -> String {
+    std::path::Path::new(p)
+        .file_stem()
+        .map_or_else(|| p.to_string(), |s| s.to_string_lossy().into_owned())
+}
+
+/// Orders the compatible features' run steps restructure → adapt → frozen
+/// (stable, like [`schedule`]) and chains the GGUFs they produce: each step
+/// starts from the latest GGUF.
+pub fn pipeline(ctx: &Context, features: &[FeaturePlan]) -> Result<Pipeline, PlanError> {
+    let mut steps: Vec<(&str, mb_features::RunStep)> = Vec::new();
+    for f in features.iter().filter(|f| f.compat.ok()) {
+        for st in feature(f.id)?.pipeline(ctx, &f.params)? {
+            steps.push((f.id, st));
+        }
+    }
+    steps.sort_by_key(|(_, s)| s.trunk);
+    let mut model = ctx.ir.raw.root.display().to_string();
+    let mut notes = Vec::new();
+    let mut hf_only: Option<String> = None;
+    let mut changed = false;
+    let mut out = Vec::new();
+    for (i, (fid, st)) in steps.into_iter().enumerate() {
+        let run = format!("runs/{fid}");
+        let fill = |t: &str| {
+            t.replace("{model}", &model)
+                .replace("{stem}", &file_stem(&model))
+                .replace("{run}", &run)
+        };
+        let mut note = fill(&st.note);
+        if let Some(h) = &hf_only {
+            if st.command.as_deref().is_some_and(|c| c.contains("{model}")) {
+                note = format!(
+                    "{note} (starts from {model}: the earlier HF-only result {h} has no GGUF form)"
+                );
+            }
+        }
+        if st.trunk == TrunkUse::Frozen && changed && st.command.is_some() {
+            note = format!("{note} Uses the trunk after every change before it.");
+        }
+        let command = st.command.as_deref().map(fill);
+        let next = match &st.produces {
+            mb_features::Produces::Gguf(p) => Some(fill(p)),
+            mb_features::Produces::Hf(p) => {
+                hf_only = Some(fill(p));
+                None
+            }
+            mb_features::Produces::Nothing => None,
+        };
+        out.push(PipelineStep {
+            order: i + 1,
+            feature: fid.to_string(),
+            stage: st.stage.clone(),
+            trunk: st.trunk,
+            command,
+            model: model.clone(),
+            note,
+        });
+        if let Some(n) = next {
+            model = n;
+            changed = true;
+        }
+        if hf_only.is_some() && st.trunk != TrunkUse::Frozen {
+            changed = true;
+        }
+    }
+    let adapt = out
+        .iter()
+        .filter(|s| {
+            s.trunk != TrunkUse::Frozen
+                && s.command
+                    .as_deref()
+                    .is_some_and(|c| c.contains("trunk-distill"))
+        })
+        .count();
+    if adapt > 1 {
+        notes.push("Each trunk-distill run uses the model it starts from as its teacher, so later runs distill from the earlier runs' results, not from the original model.".into());
+    }
+    let missing: Vec<String> = out
+        .iter()
+        .filter(|s| s.command.is_none())
+        .map(|s| format!("{}/{}", s.feature, s.stage.as_deref().unwrap_or("?")))
+        .collect();
+    if !missing.is_empty() {
+        notes.push(format!("No runner yet for: {}.", missing.join(", ")));
+    }
+    Ok(Pipeline {
+        steps: out,
+        final_model: model,
+        notes,
+    })
 }
 
 fn reason(t: TrunkUse) -> &'static str {
@@ -309,6 +431,7 @@ pub fn plan(
         model: ctx.ir.raw.root.display().to_string(),
         hardware: hardware.iter().map(|h| (*h).clone()).collect(),
         schedule: schedule(&features, &inputs, hardware),
+        pipeline: pipeline(ctx, &features)?,
         features,
         cost_model_assumptions: cost_model_assumptions(),
     })

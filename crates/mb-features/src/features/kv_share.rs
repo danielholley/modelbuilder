@@ -231,6 +231,28 @@ impl Feature for KvShare {
         ])
     }
 
+    fn pipeline(
+        &self,
+        _ctx: &Context,
+        params: &Params,
+    ) -> Result<Vec<crate::RunStep>, FeatureError> {
+        let p: P = parse_params(ID, params)?;
+        Ok(vec![
+            crate::RunStep::run(
+                TrunkUse::Restructure,
+                Some("reuse-adapt"),
+                format!("modelbuilder job trunk-distill {{model}} --reference <hf-reference> --texts <texts.jsonl> --kv-share-group {} -o {{run}}", p.group),
+                crate::Produces::Gguf("{run}/{stem}-kv-share-qat.gguf".into()),
+                "The written-back GGUF still holds every layer's K/V: no llama.cpp build runs reuse layers yet.",
+            ),
+            crate::RunStep::missing(
+                TrunkUse::Restructure,
+                "long-context",
+                "Not chained yet: trunk-distill's teacher is the model it starts from, so a second run on the adapted GGUF would distill from the adapted weights rather than the original.",
+            ),
+        ])
+    }
+
     fn export_notes(&self, _ctx: &Context, _params: &Params) -> Result<Vec<String>, FeatureError> {
         Ok(vec![
             "No runtime supports this layout yet: stock llama.cpp and the PrismML fork expect K/V projections in every attention layer. Running the result needs a graph change (reuse layers read the source layer's cache) and a cache allocator that skips reuse layers.".into(),

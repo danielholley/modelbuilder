@@ -304,7 +304,39 @@ export type ParamBreakdown = { total: number, embedding: number, lm_head: number
  */
 active_per_token: number, };
 
-export type Plan = { model: string, hardware: Array<HardwareProfile>, features: Array<FeaturePlan>, schedule: Schedule, cost_model_assumptions: Array<string>, };
+export type Pipeline = { steps: Array<PipelineStep>, 
+/**
+ * The GGUF the last step leaves (the input model when nothing changes it).
+ */
+final_model: string, notes: Array<string>, };
+
+/**
+ * One command of the [`Pipeline`].
+ */
+export type PipelineStep = { 
+/**
+ * 1-based position.
+ */
+order: number, feature: string, 
+/**
+ * The schedule stage this step trains, if any.
+ */
+stage: string | null, trunk: TrunkUse, 
+/**
+ * `None`: modelbuilder has no runner for this step yet. `<...>` marks
+ * inputs to fill in.
+ */
+command: string | null, 
+/**
+ * The model the step starts from.
+ */
+model: string, note: string, };
+
+export type Plan = { model: string, hardware: Array<HardwareProfile>, features: Array<FeaturePlan>, schedule: Schedule, 
+/**
+ * The commands that carry the plan out, in schedule order.
+ */
+pipeline: Pipeline, cost_model_assumptions: Array<string>, };
 
 export type PlanRequest = { 
 /**

@@ -189,6 +189,21 @@ impl Feature for Mla {
         ])
     }
 
+    fn pipeline(
+        &self,
+        _ctx: &Context,
+        params: &Params,
+    ) -> Result<Vec<crate::RunStep>, FeatureError> {
+        let p: P = parse_params(ID, params)?;
+        Ok(vec![crate::RunStep::run(
+            TrunkUse::Restructure,
+            Some("mla-recover"),
+            format!("modelbuilder job trunk-distill {{model}} --reference <hf-reference> --texts <texts.jsonl> --mla-rank {} --mla-rope-dim {} -o {{run}}", p.kv_rank, p.rope_dim),
+            crate::Produces::Hf("{run}/mla".into()),
+            "Exports the model, converts it (surgery mla) and trains the latent against the original; the result stays an HF checkpoint.",
+        )])
+    }
+
     fn export_notes(&self, _ctx: &Context, _params: &Params) -> Result<Vec<String>, FeatureError> {
         Ok(vec![
             "llama.cpp and vLLM run MLA only for DeepSeek-style architectures; a converted model must be exported in that layout (with its MLPs, norms and vocabulary mapped over) or needs runtime support.".into(),

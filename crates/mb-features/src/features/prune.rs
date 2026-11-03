@@ -212,6 +212,30 @@ impl Feature for Prune {
         ])
     }
 
+    fn pipeline(
+        &self,
+        ctx: &Context,
+        params: &Params,
+    ) -> Result<Vec<crate::RunStep>, FeatureError> {
+        let p: P = parse_params(ID, params)?;
+        let (start, count) = block(ctx.ir, &p);
+        let mut v = vec![crate::RunStep::run(
+            TrunkUse::Restructure,
+            None,
+            format!("modelbuilder surgery prune {{model}} --layers {start}..{} -o {{run}}/{{stem}}-pruned.gguf", start + count),
+            crate::Produces::Gguf("{run}/{stem}-pruned.gguf".into()),
+            "Measure the damage before healing: `modelbuilder_train probe perplexity`.",
+        )];
+        if p.heal {
+            v.push(crate::RunStep::missing(
+                TrunkUse::Restructure,
+                "heal",
+                "Healing distills from the unpruned model, a second set of weights; trunk_distill only uses the model it trains as its own teacher.",
+            ));
+        }
+        Ok(v)
+    }
+
     fn export_notes(&self, _ctx: &Context, _params: &Params) -> Result<Vec<String>, FeatureError> {
         Ok(vec![
             "A pruned model is the same architecture with fewer layers, so every runtime runs it unchanged.".into(),

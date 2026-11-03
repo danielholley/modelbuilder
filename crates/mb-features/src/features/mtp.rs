@@ -207,6 +207,38 @@ impl Feature for Mtp {
         Ok(out)
     }
 
+    fn pipeline(
+        &self,
+        _ctx: &Context,
+        params: &Params,
+    ) -> Result<Vec<crate::RunStep>, FeatureError> {
+        let p: P = parse_params(ID, params)?;
+        let from = p.from.unwrap_or_else(|| "<hf-reference>".into());
+        Ok(vec![
+            crate::RunStep::run(
+                TrunkUse::Frozen,
+                None,
+                format!("modelbuilder surgery mtp {{model}} --from {from} -o {{run}}/{{stem}}-mtp.gguf"),
+                crate::Produces::Nothing,
+                "The ported head, untrained: a baseline sidecar to benchmark.",
+            ),
+            crate::RunStep::run(
+                TrunkUse::Frozen,
+                None,
+                "python -m modelbuilder_train extract-features --llama-bin <fork>/build/bin --model {model} --texts <self-generated.jsonl> --out {run}/features".into(),
+                crate::Produces::Nothing,
+                "Trunk features of the final model (generate the texts with `modelbuilder_train generate-corpus`).",
+            ),
+            crate::RunStep::run(
+                TrunkUse::Frozen,
+                Some("mtp-align"),
+                format!("modelbuilder job mtp-align {{model}} --from {from} --features {{run}}/features -o {{run}}"),
+                crate::Produces::Nothing,
+                "Writes the aligned sidecar {run}/{stem}-mtp-aligned.gguf; compare both with `modelbuilder_train bench-draft`.",
+            ),
+        ])
+    }
+
     fn export_notes(&self, _ctx: &Context, _params: &Params) -> Result<Vec<String>, FeatureError> {
         Ok(vec![
             "PrismML fork: run with `--spec-type draft-mtp`; MTP support for these files landed in PR #205 (merged 2026-09-21), so use a build from after that date.".into(),

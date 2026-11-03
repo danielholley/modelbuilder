@@ -539,3 +539,21 @@ details[open] > summary {
   border-radius: 4px;
   min-width: 3px;
 }
+
+.pipeline {
+  margin: 0 0 12px;
+  padding-left: 20px;
+}
+.pipeline li + li {
+  margin-top: 10px;
+}
+.command {
+  font-family: var(--mono);
+  font-size: 12px;
+  margin: 4px 0;
+  padding: 6px 8px;
+  background: var(--surface-2);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

@@ -222,6 +222,44 @@ impl Feature for DraftHead {
         ])
     }
 
+    fn pipeline(
+        &self,
+        _ctx: &Context,
+        params: &Params,
+    ) -> Result<Vec<crate::RunStep>, FeatureError> {
+        let p: P = parse_params(ID, params)?;
+        let stage = format!("{:?}-train", p.kind).to_lowercase();
+        let extract = crate::RunStep::run(
+            TrunkUse::Frozen,
+            None,
+            "python -m modelbuilder_train extract-features --llama-bin <fork>/build/bin --model {model} --texts <self-generated.jsonl> --out {run}/features".into(),
+            crate::Produces::Nothing,
+            "Trunk features of the final model.",
+        );
+        let train = match p.kind {
+            Kind::Medusa => crate::RunStep::run(
+                TrunkUse::Frozen,
+                Some(&stage),
+                format!("modelbuilder job draft-align {{model}} --kind medusa --heads {} --features {{run}}/features -o {{run}}", p.size.unwrap_or(4)),
+                crate::Produces::Nothing,
+                "Writes {run}/medusa-head (safetensors).",
+            ),
+            Kind::Eagle => crate::RunStep::run(
+                TrunkUse::Frozen,
+                Some(&stage),
+                format!("modelbuilder job draft-align {{model}} --kind eagle --blocks {} --reference <hf-reference> --features {{run}}/features -o {{run}}", p.size.unwrap_or(1)),
+                crate::Produces::Nothing,
+                "Writes {run}/eagle-head (safetensors).",
+            ),
+            Kind::Dspark => crate::RunStep::missing(
+                TrunkUse::Frozen,
+                &stage,
+                "No public reference implementation of DSpark to follow.",
+            ),
+        };
+        Ok(vec![extract, train])
+    }
+
     fn export_notes(&self, _ctx: &Context, params: &Params) -> Result<Vec<String>, FeatureError> {
         let p: P = parse_params(ID, params)?;
         Ok(vec![match p.kind {

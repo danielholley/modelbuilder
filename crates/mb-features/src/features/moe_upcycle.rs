@@ -182,6 +182,37 @@ impl Feature for MoeUpcycle {
         ])
     }
 
+    fn pipeline(
+        &self,
+        ctx: &Context,
+        params: &Params,
+    ) -> Result<Vec<crate::RunStep>, FeatureError> {
+        let p: P = parse_params(ID, params)?;
+        // The architectures `surgery upcycle` maps (mb_surgery::upcycle::MOE_ARCHS).
+        let family = ctx.ir.family.as_deref().unwrap_or("");
+        if !matches!(family, "llama" | "qwen3") {
+            return Ok(vec![crate::RunStep::missing(
+                TrunkUse::Restructure,
+                "upcycle",
+                &format!("`surgery upcycle` maps llama and qwen3 GGUFs only; `{family}` has no verified MoE layout yet."),
+            )]);
+        }
+        Ok(vec![
+            crate::RunStep::run(
+                TrunkUse::Restructure,
+                None,
+                format!("modelbuilder surgery upcycle {{model}} --experts {} --top-k {} -o {{run}}/{{stem}}-moe.gguf", p.experts, p.top_k),
+                crate::Produces::Gguf("{run}/{stem}-moe.gguf".into()),
+                "Exact copies: the upcycled model computes the dense model's function until it is trained. export-hf has no MoE adapter yet, so later trunk-distill steps can't start from it.",
+            ),
+            crate::RunStep::missing(
+                TrunkUse::Restructure,
+                "upcycle",
+                "Continued pretraining at this scale needs a pretraining backend (multi-node, sharded); modelbuilder has none yet.",
+            ),
+        ])
+    }
+
     fn export_notes(&self, _ctx: &Context, _params: &Params) -> Result<Vec<String>, FeatureError> {
         Ok(vec![
             "llama.cpp runs MoE only in architectures whose loader expects expert tensors (e.g. llama with expert_count, qwen2moe, qwen3moe); upcycling a dense architecture may need an architecture change in the metadata.".into(),

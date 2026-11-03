@@ -521,6 +521,35 @@ pub fn plan(p: &mb_plan::Plan) -> String {
         }
         let _ = writeln!(s);
     }
+    if !p.pipeline.steps.is_empty() {
+        let _ = writeln!(s, "PIPELINE (commands for the schedule; fill in <...>)");
+        for st in &p.pipeline.steps {
+            let stage = st
+                .stage
+                .as_deref()
+                .map_or(String::new(), |x| format!(" [{x}]"));
+            match &st.command {
+                Some(c) => {
+                    let _ = writeln!(s, "  {}. {}{stage}\n     {c}", st.order, st.feature);
+                }
+                None => {
+                    let _ = writeln!(
+                        s,
+                        "  {}. {}{stage}\n     (no runner yet)",
+                        st.order, st.feature
+                    );
+                }
+            }
+            if !st.note.is_empty() {
+                let _ = writeln!(s, "     {}", st.note);
+            }
+        }
+        let _ = writeln!(s, "  final model: {}", p.pipeline.final_model);
+        for n in &p.pipeline.notes {
+            let _ = writeln!(s, "  note: {n}");
+        }
+        let _ = writeln!(s);
+    }
     let _ = writeln!(s, "COST MODEL");
     for a in &p.cost_model_assumptions {
         let _ = writeln!(s, "  {a}");

@@ -116,6 +116,62 @@ pub struct Estimate {
     pub references: Vec<String>,
 }
 
+/// What the next step works on after a [`RunStep`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "kind", content = "path", rename_all = "snake_case")]
+pub enum Produces {
+    /// The model is unchanged (e.g. a separate drafter or sidecar).
+    Nothing,
+    /// A new GGUF that later steps should use (`{run}`-relative path).
+    Gguf(String),
+    /// A Hugging Face checkpoint that no GGUF runtime loads; later GGUF steps can't follow it.
+    Hf(String),
+}
+
+/// One command that carries out part of a feature. In `command`, `{model}`
+/// is the model the step works on, `{stem}` its file stem and `{run}` the
+/// feature's run directory; `<...>` marks inputs the user supplies.
+#[derive(Clone, Debug, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct RunStep {
+    pub trunk: TrunkUse,
+    /// The estimate stage this step trains, if any.
+    pub stage: Option<String>,
+    /// `None`: modelbuilder has no runner for this step yet.
+    pub command: Option<String>,
+    pub produces: Produces,
+    pub note: String,
+}
+
+impl RunStep {
+    pub fn run(
+        trunk: TrunkUse,
+        stage: Option<&str>,
+        command: String,
+        produces: Produces,
+        note: &str,
+    ) -> Self {
+        Self {
+            trunk,
+            stage: stage.map(str::to_owned),
+            command: Some(command),
+            produces,
+            note: note.into(),
+        }
+    }
+
+    pub fn missing(trunk: TrunkUse, stage: &str, note: &str) -> Self {
+        Self {
+            trunk,
+            stage: Some(stage.into()),
+            command: None,
+            produces: Produces::Nothing,
+            note: note.into(),
+        }
+    }
+}
+
 pub trait Feature: Sync {
     fn id(&self) -> &'static str;
     fn title(&self) -> &'static str;
@@ -126,6 +182,11 @@ pub trait Feature: Sync {
     /// The tensor and metadata changes surgery would make, in words.
     fn surgery_outline(&self, ctx: &Context, params: &Params) -> Result<Vec<String>, FeatureError>;
     fn export_notes(&self, ctx: &Context, params: &Params) -> Result<Vec<String>, FeatureError>;
+    /// The commands that apply the feature, in order. The planner orders
+    /// them across features and chains the models they produce.
+    fn pipeline(&self, _ctx: &Context, _params: &Params) -> Result<Vec<RunStep>, FeatureError> {
+        Ok(vec![])
+    }
 }
 
 /// Looks a feature up by id.

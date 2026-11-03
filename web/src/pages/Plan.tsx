@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
-import type { Catalog, ComputeEstimate, FeaturePlan, Fit, Plan, Schedule } from "../api/types";
+import type { Catalog, ComputeEstimate, FeaturePlan, Fit, Pipeline, Plan, Schedule } from "../api/types";
 import { RangeBar } from "../components/charts";
 import { Card, ErrorBox, KV, Notes, Status, useCall, useStored, type Tone } from "../components/ui";
 import { bytes, count, range } from "../lib/format";
@@ -266,10 +266,38 @@ function ScheduleCard({ schedule }: { schedule: Schedule }) {
   );
 }
 
+function PipelineCard({ pipeline }: { pipeline: Pipeline }) {
+  if (pipeline.steps.length === 0) return null;
+  return (
+    <Card title="Pipeline">
+      <p className="secondary" style={{ marginTop: 0 }}>
+        The commands that carry the schedule out. Each step starts from the model the steps before it produced; fill in the{" "}
+        <code>&lt;…&gt;</code> inputs.
+      </p>
+      <ol className="pipeline">
+        {pipeline.steps.map((s) => (
+          <li key={s.order}>
+            <div>
+              <span className="mono">{s.feature}</span>
+              {s.stage && <span className="muted"> · {s.stage}</span>}{" "}
+              {s.command ? <Status tone="good">runnable</Status> : <Status tone="warning">no runner yet</Status>}
+            </div>
+            {s.command && <pre className="command">{s.command}</pre>}
+            {s.note && <div className="secondary">{s.note}</div>}
+          </li>
+        ))}
+      </ol>
+      <KV rows={[["final model", <span className="mono">{pipeline.final_model}</span>]]} />
+      {pipeline.notes.length > 0 && <Notes items={pipeline.notes} />}
+    </Card>
+  );
+}
+
 export function PlanView({ plan }: { plan: Plan }) {
   return (
     <div className="stack">
       <ScheduleCard schedule={plan.schedule} />
+      <PipelineCard pipeline={plan.pipeline} />
       {plan.features.map((f) => (
         <FeatureCard key={`${f.id}-${JSON.stringify(f.params)}`} f={f} />
       ))}

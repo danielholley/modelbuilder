@@ -179,6 +179,30 @@ impl Feature for Fp4Kv {
         })
     }
 
+    fn pipeline(
+        &self,
+        _ctx: &Context,
+        params: &Params,
+    ) -> Result<Vec<crate::RunStep>, FeatureError> {
+        let p: P = parse_params(ID, params)?;
+        Ok(vec![match p.mode {
+            Mode::Ptq => crate::RunStep::run(
+                TrunkUse::Adapt,
+                None,
+                "python -m modelbuilder_train probe kv-cache --llama-bin <fork>/build/bin --model {model} --types q8_0,q4_0 --text <text.txt> --lengths 4096,16384".into(),
+                crate::Produces::Nothing,
+                "Measures what llama.cpp's quantized cache types cost; serve with -ctk/-ctv set to the chosen type.",
+            ),
+            Mode::Qat => crate::RunStep::run(
+                TrunkUse::Adapt,
+                Some("kv-fp4-qat"),
+                "modelbuilder job trunk-distill {model} --reference <hf-reference> --texts <texts.jsonl> --kv-format nvfp4 -o {run}".into(),
+                crate::Produces::Gguf("{run}/{stem}-kv-quant-qat.gguf".into()),
+                "nvfp4 is the paper's format but no llama.cpp cache type runs it; --kv-format q4_0 trains for a cache llama.cpp has.",
+            ),
+        }])
+    }
+
     fn export_notes(&self, _ctx: &Context, _params: &Params) -> Result<Vec<String>, FeatureError> {
         Ok(vec![
             "llama.cpp: `--cache-type-k q4_0 --cache-type-v q4_0` is the nearest available cache format (same 4.5 bits); the paper's E2M1+E4M3/16 layout is not a llama.cpp cache type, so QAT should target the format the runtime will actually use.".into(),

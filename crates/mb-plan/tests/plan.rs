@@ -264,3 +264,49 @@ fn schedule_orders_restructure_then_adapt_then_frozen() {
     // The MTP stage precomputes features, so extraction is priced separately.
     assert!(t.extraction_gpu_hours.is_some());
 }
+
+#[test]
+fn pipeline_chains_models_in_schedule_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let ir = load(&mb_fixtures::gguf_hybrid_ternary(dir.path()));
+    let ctx = Context::new(&ir, None);
+    let hw = resolve_hardware(&["1x24GB".into()]).unwrap();
+    let reqs = [
+        parse_feature_spec("mtp"),
+        parse_feature_spec("fp4-kv"),
+        parse_feature_spec("prune-layers:heal=false"),
+    ];
+    let p = plan(&ctx, &reqs, &hw).unwrap();
+    let steps = &p.pipeline.steps;
+    // Restructure (prune) → adapt (fp4-kv QAT) → frozen (mtp), whatever the request order.
+    let order: Vec<&str> = steps.iter().map(|s| s.feature.as_str()).collect();
+    assert_eq!(order[0], "prune-layers");
+    assert_eq!(order[1], "fp4-kv");
+    assert!(order[2..].iter().all(|f| *f == "mtp"));
+    // Each step starts from the previous step's GGUF.
+    assert!(
+        steps[1].model.ends_with("-pruned.gguf"),
+        "{}",
+        steps[1].model
+    );
+    assert!(steps[1]
+        .command
+        .as_ref()
+        .unwrap()
+        .contains("--kv-format nvfp4"));
+    assert!(steps[2].model.ends_with("-pruned-kv-quant-qat.gguf"));
+    assert_eq!(p.pipeline.final_model, steps[2].model);
+    let align = steps
+        .iter()
+        .find(|s| s.stage.as_deref() == Some("mtp-align"))
+        .unwrap();
+    assert!(align.command.as_ref().unwrap().contains("job mtp-align"));
+    assert!(steps
+        .iter()
+        .all(|s| s.command.as_ref().is_none_or(|c| !c.contains("{"))));
+
+    // A step with no runner is listed, and the plan says so.
+    let p = plan(&ctx, &[parse_feature_spec("moe-upcycle")], &hw).unwrap();
+    assert!(p.pipeline.steps.iter().any(|s| s.command.is_none()));
+    assert!(p.pipeline.notes.iter().any(|n| n.contains("No runner")));
+}
