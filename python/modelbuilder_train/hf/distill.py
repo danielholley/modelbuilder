@@ -101,6 +101,16 @@ class Switch(nn.Module):
         return self.fmt(w) if self.fmt is not None else w
 
 
+def checkpoint_names(model: nn.Module, tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Parameters under their checkpoint names: transformers ≥ 5 fuses some on load
+    (e.g. MoE experts into ``experts.gate_up_proj``) and this splits them back."""
+    try:
+        from transformers.core_model_loading import revert_weight_conversion
+    except ImportError:  # transformers 4: parameters are stored as they are named
+        return tensors
+    return revert_weight_conversion(model, dict(tensors))
+
+
 def load_sequences(path: Path, tokenizer_dir: Path) -> list[list[int]]:
     """JSONL lines with ``tokens`` (ids) or ``text`` (tokenized with the model's tokenizer)."""
     lines = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
@@ -199,6 +209,12 @@ def run_trunk_distill(
             if not any(pat in full for pat in stage.trainable):
                 continue
             fmt = formats.get(full)
+            if fmt is None and formats:
+                # A fused parameter (e.g. stacked experts): the format of the tensors it was built from.
+                names = list(checkpoint_names(model, {full: p.detach()}))
+                found = {(formats[n].dtype, formats[n].rotated) for n in names if n in formats}
+                if names != [full] and len(found) == 1 and all(n in formats for n in names):
+                    fmt = formats[names[0]]
             if fmt is not None:
                 fmt = fakequant.resolve_signs(fmt, p.shape[-1], full)
             sw = Switch(p, mode, fmt, stage.lora_rank, stage.lora_alpha)
@@ -318,6 +334,7 @@ def run_trunk_distill(
             mod_name, _, pname = full.rpartition(".")
             mod = model.get_submodule(mod_name) if mod_name else model
             tensors[full] = getattr(mod, pname).detach().float().contiguous()  # the student's (fake-quantized) value
+        tensors = {k: v.contiguous() for k, v in checkpoint_names(model, tensors).items()}
         save_file(tensors, str(out / "model.safetensors"), metadata={"format": "pt", "modelbuilder": "trunk-distill"})
         for f in ("config.json", MANIFEST):
             if (model_dir / f).exists():

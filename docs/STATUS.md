@@ -40,8 +40,10 @@ speculative decoding and **DeepSeek-V4.1-Flash-style KV cache changes**.
   computes the dense function until trained. `export-hf` writes MoE GGUFs as
   Mixtral or Qwen3-MoE checkpoints (one tensor per expert, routing config
   with renormalized top-k): in transformers the upcycled model matches the
-  dense one exactly, and `trunk_distill` trains and writes back into it
-  (expert tensors themselves can't be written back yet). `qwen35` is
+  dense one exactly, and `trunk_distill` trains its experts and routers
+  (transformers' fused expert parameters are mapped back to checkpoint
+  names and fake-quantized in the source format) and `surgery replace`
+  re-encodes every expert into the stacked GGUF tensors. `qwen35` is
   refused: its MoE counterpart expects a shared expert, a layout not
   verified yet.
 - **`surgery mla`** (MHA2MLA, arXiv 2502.14837): partial RoPE per KV head

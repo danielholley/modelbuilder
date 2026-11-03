@@ -203,12 +203,14 @@ impl Feature for MoeUpcycle {
                 None,
                 format!("modelbuilder surgery upcycle {{model}} --experts {} --top-k {} -o {{run}}/{{stem}}-moe.gguf", p.experts, p.top_k),
                 crate::Produces::Gguf("{run}/{stem}-moe.gguf".into()),
-                "Exact copies: the upcycled model computes the dense model's function until it is trained (checked in transformers' Mixtral and Qwen3-MoE). export-hf and trunk-distill work on it; writing trained experts back isn't supported yet.",
+                "Exact copies: the upcycled model computes the dense model's function until it is trained (checked in transformers' Mixtral and Qwen3-MoE).",
             ),
-            crate::RunStep::missing(
+            crate::RunStep::run(
                 TrunkUse::Restructure,
-                "upcycle",
-                "Continued pretraining at this scale needs a pretraining backend (multi-node, sharded); modelbuilder has none yet.",
+                Some("upcycle"),
+                "modelbuilder job trunk-distill {model} --reference <hf-reference> --texts <pretraining-mix.jsonl> --loss ce --trainable mlp. --device-map auto -o {run}".into(),
+                crate::Produces::Gguf("{run}/{stem}-finetune.gguf".into()),
+                "Next-token training of the experts and routers on one machine, re-encoded into the MoE GGUF. The paper's tens of billions of tokens need a multi-node backend, which modelbuilder doesn't have.",
             ),
         ])
     }

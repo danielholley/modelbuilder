@@ -148,6 +148,32 @@ fn upcycled_experts_export_as_copies_of_the_dense_mlp() {
             vec![3, 64]
         );
     }
+
+    // And back: every expert re-encoded from the HF tensors, byte for byte.
+    let (g, gir) = open(&dir.path().join("moe.gguf"));
+    let back = dir.path().join("back.gguf");
+    let rep = replace_tensors(
+        &g,
+        &gir,
+        &moe,
+        &back,
+        &ReplaceOptions {
+            config: dir.path().join("m/config.json"),
+            overwrite: false,
+            max_rel_error: Some(1e-6),
+        },
+    )
+    .unwrap();
+    assert!(rep.tensors.iter().any(|t| t.source == "updates:3 experts"));
+    let (b, _) = open(&back);
+    for t in &gir.raw.tensors {
+        assert_eq!(
+            g.tensor_bytes(t).unwrap(),
+            b.tensor_bytes(b.tensor(&t.name).unwrap()).unwrap(),
+            "{}",
+            t.name
+        );
+    }
 }
 
 #[test]

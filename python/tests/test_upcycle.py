@@ -38,7 +38,8 @@ def test_upcycled_model_computes_the_dense_function(tmp_path: Path, fixture: str
     assert torch.allclose(d, m, atol=1e-5), (d - m).abs().max()
 
 
-def test_trunk_distill_writes_back_into_an_upcycled_model(tmp_path: Path) -> None:
+def test_continued_training_of_the_experts_writes_back(tmp_path: Path) -> None:
+    """Upcycle → train experts and router (next-token loss) → re-encode every expert into the MoE GGUF."""
     pytest.importorskip("transformers")
     dense = Path(mb("fixture", "gguf-qwen3", str(tmp_path / "d")).strip())
     moe = tmp_path / "moe.gguf"
@@ -50,9 +51,18 @@ def test_trunk_distill_writes_back_into_an_upcycled_model(tmp_path: Path) -> Non
     run = tmp_path / "run"
     out = mb(
         "job", "trunk-distill", str(moe), "--reference", str(dense.parent), "--texts", str(texts), "-o", str(run),
-        "--kv-format", "q4_0", "--steps", "3", "--seq-len", "32", "--batch-seqs", "1", "--device", "cpu", "--fp32",
-        "--max-rel-error", "1e-4", "--raw-events", "--python", sys.executable,
+        "--loss", "ce", "--trainable", "mlp.", "--steps", "6", "--seq-len", "32", "--batch-seqs", "2", "--lr", "3e-3",
+        "--eval-every", "6", "--log-every", "3", "--device", "cpu", "--fp32", "--max-rel-error", "1e-4",
+        "--raw-events", "--python", sys.executable,
     )  # fmt: skip
-    assert "re-quantization error 0.000% RMS" in out
-    info = json.loads(mb("inspect", str(run / "moe-kv-quant-qat.gguf"), "--json"))
-    assert info
+    events = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
+    evals = [e for e in events if e["event"] == "eval"]
+    assert evals[-1]["loss"] < evals[0]["loss"], evals
+    assert "updates:2 experts" in out and "re-quantization error 0.000% RMS" in out
+    new = run / "moe-finetune.gguf"
+    assert json.loads(mb("inspect", str(new), "--json"))
+    # The trained model in transformers is the written-back GGUF, exported again.
+    mb("export-hf", str(new), "--reference", str(dense.parent), "--dtype", "f32", "-o", str(tmp_path / "again"))
+    _, logits = _logits(tmp_path / "again")
+    _, before = _logits(run / "hf")
+    assert not torch.allclose(logits, before, atol=1e-4)

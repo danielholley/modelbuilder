@@ -88,23 +88,12 @@ pub fn replace_tensors(
     let mut written = Vec::new();
     for t in &target_ir.raw.tensors {
         let bytes = target.tensor_bytes(t)?;
-        let mut all = arch::to_hf_all(adapter, &dims, &t.name, &t.shape, grouped_out)?;
-        let mapping = if all.len() > 1 {
-            // A stacked expert tensor: one HF tensor per expert.
-            if let Some(m) = all.iter().find(|m| updates.tensor(&m.hf_name).is_some()) {
-                return Err(SurgeryError::Unsupported(format!(
-                    "{} updates one expert of the stacked {}; writing experts back isn't supported yet",
-                    m.hf_name, t.name
-                )));
-            }
-            None
-        } else {
-            all.pop()
-        };
-        let update = mapping
-            .as_ref()
-            .and_then(|m| updates.tensor(&m.hf_name).map(|u| (m, u)));
-        let Some((m, u)) = update else {
+        let all = arch::to_hf_all(adapter, &dims, &t.name, &t.shape, grouped_out)?;
+        let found: Vec<(&Mapping, Option<&mb_ir::TensorInfo>)> = all
+            .iter()
+            .map(|m| (m, updates.tensor(&m.hf_name)))
+            .collect();
+        if found.iter().all(|(_, u)| u.is_none()) {
             tensors.push(TensorToWrite {
                 name: t.name.clone(),
                 dtype: t.dtype,
@@ -112,13 +101,6 @@ pub fn replace_tensors(
                 data: Cow::Borrowed(bytes),
             });
             continue;
-        };
-        used.insert(m.hf_name.clone());
-        if u.shape != m.hf_shape {
-            return Err(SurgeryError::Incompatible(format!(
-                "{}: shape {:?}, but {} needs {:?}",
-                m.hf_name, u.shape, t.name, m.hf_shape
-            )));
         }
         if !supports(t.dtype) {
             return Err(SurgeryError::Unsupported(format!(
@@ -126,22 +108,59 @@ pub fn replace_tensors(
                 t.name, t.dtype
             )));
         }
-        let mut hf = Vec::new();
-        dequantize(u.dtype, updates.tensor_bytes(u)?, &mut hf).map_err(|source| {
-            SurgeryError::Dequant {
-                name: u.name.clone(),
-                source,
-            }
-        })?;
-        let mut vals = to_gguf_order(m, &hf, &t.shape);
         let rotated = rotation.is_some_and(|r| r.is_rotated(&t.name));
         let width = *t.shape.last().unwrap_or(&1) as usize;
-        if rotated {
-            let r = rotation.expect("rotated implies a rotation");
-            for row in vals.chunks_exact_mut(width) {
-                r.from_primal(&t.name, row)
-                    .map_err(|e| SurgeryError::Unsupported(format!("{}: {e}", t.name)))?;
+        // The new values in GGUF order and the stored basis. A stacked expert
+        // tensor is filled expert by expert: updated experts from the updates,
+        // the others decoded from the target as they are.
+        let mut vals = Vec::with_capacity(t.n_elements() as usize);
+        let mut sources = Vec::new();
+        let mut from_dtype = None;
+        for (m, u) in &found {
+            let Some(u) = u else {
+                let first = m.rows.as_ref().map_or(0, |r| r[0]);
+                let rows = m.rows.as_ref().map_or(0, Vec::len);
+                let row_bytes = bytes.len() / (t.n_elements() as usize / width.max(1)).max(1);
+                dequantize(
+                    t.dtype,
+                    &bytes[first * row_bytes..(first + rows) * row_bytes],
+                    &mut vals,
+                )
+                .map_err(|source| SurgeryError::Dequant {
+                    name: t.name.clone(),
+                    source,
+                })?;
+                continue;
+            };
+            used.insert(m.hf_name.clone());
+            sources.push(m.hf_name.clone());
+            from_dtype = Some(u.dtype);
+            if u.shape != m.hf_shape {
+                return Err(SurgeryError::Incompatible(format!(
+                    "{}: shape {:?}, but {} needs {:?}",
+                    m.hf_name, u.shape, t.name, m.hf_shape
+                )));
             }
+            let mut hf = Vec::new();
+            dequantize(u.dtype, updates.tensor_bytes(u)?, &mut hf).map_err(|source| {
+                SurgeryError::Dequant {
+                    name: u.name.clone(),
+                    source,
+                }
+            })?;
+            let mut part = if found.len() > 1 {
+                hf // an expert slice: rows in order, no element transform
+            } else {
+                to_gguf_order(m, &hf, &t.shape)
+            };
+            if rotated {
+                let r = rotation.expect("rotated implies a rotation");
+                for row in part.chunks_exact_mut(width) {
+                    r.from_primal(&t.name, row)
+                        .map_err(|e| SurgeryError::Unsupported(format!("{}: {e}", t.name)))?;
+                }
+            }
+            vals.extend(part);
         }
         let mut data = Vec::with_capacity(bytes.len());
         quantize(t.dtype, &vals, &mut data)
@@ -174,10 +193,14 @@ pub fn replace_tensors(
             name: t.name.clone(),
             dtype: t.dtype.to_string(),
             shape: t.shape.clone(),
-            source: format!("updates:{}", m.hf_name),
+            source: if sources.len() > 1 {
+                format!("updates:{} experts", sources.len())
+            } else {
+                format!("updates:{}", sources.join(","))
+            },
             transform: format!(
                 "{} → {}{}, re-quantization error {:.3}% RMS",
-                u.dtype,
+                from_dtype.expect("at least one update"),
                 t.dtype,
                 if rotated {
                     " (rotation re-applied)"
