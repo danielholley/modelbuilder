@@ -43,6 +43,10 @@ peak_gib_per_gpu: number,
  */
 peak_gib_per_gpu_packed_trunk: number, 
 /**
+ * With a BF16 trunk, training rank-[`LORA_RANK`] LoRA factors instead of the trainable tensors.
+ */
+peak_gib_per_gpu_lora: number, 
+/**
  * GPU-hours to compute precomputed features (one trunk forward per token),
  * separate from training; `None` when no stage precomputes.
  */
@@ -119,7 +123,7 @@ estimate: Estimate | null, compute: Array<ComputeEstimate>, surgery: Array<strin
 
 export type FfnSpec = { "type": "dense", intermediate_size: number | null, } | { "type": "moe" } & MoeSpec | { "type": "none" };
 
-export type Fit = "not_applicable" | "yes" | "with_packed_trunk" | "no";
+export type Fit = "not_applicable" | "yes" | "with_lora" | "with_packed_trunk" | "no";
 
 /**
  * A GGML tensor type id. Ids outside the known table are kept verbatim.

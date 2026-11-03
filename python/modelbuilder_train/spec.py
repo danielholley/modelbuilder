@@ -47,6 +47,8 @@ class TrunkDistill(_Strict):
     weight_fakequant: bool = True
     teacher: str | None = None
     loss: Literal["kl", "ce"] = "kl"
+    lora_rank: int | None = Field(default=None, ge=1)
+    lora_alpha: float | None = Field(default=None, gt=0)
     eval_fraction: float = Field(default=0.05, ge=0, le=0.5)
 
 

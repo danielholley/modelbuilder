@@ -620,6 +620,7 @@ impl App {
             for c in &fp.compute {
                 let (tone, fit) = match c.fits {
                     Fit::Yes => (GOOD, "✓ fits"),
+                    Fit::WithLora => (WARNING, "! with LoRA"),
                     Fit::WithPackedTrunk => (WARNING, "! packed trunk"),
                     Fit::No => (CRITICAL, "✕ doesn't fit"),
                     Fit::NotApplicable => (MUTED, "n/a"),

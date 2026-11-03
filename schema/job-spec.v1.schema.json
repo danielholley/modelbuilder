@@ -307,6 +307,22 @@
           "default": "kl",
           "description": "kl: KL to the teacher's next-token distribution; ce: next-token cross-entropy on the texts (no teacher), e.g. a long-context finetune."
         },
+        "lora_rank": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "Train a rank-r LoRA update of each trainable tensor instead of the tensor itself; it is merged (and fake-quantized) before write-back."
+        },
+        "lora_alpha": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "exclusiveMinimum": 0,
+          "description": "LoRA scale numerator: the update is (alpha / rank)·B·A. Default: rank (scale 1)."
+        },
         "eval_fraction": {
           "type": "number",
           "minimum": 0,

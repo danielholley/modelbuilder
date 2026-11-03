@@ -230,9 +230,9 @@ impl Feature for Prune {
             v.push(crate::RunStep::run(
                 TrunkUse::Restructure,
                 Some("heal"),
-                "modelbuilder job trunk-distill {model} --reference <hf-reference> --texts <texts.jsonl> --teacher {source} --trainable mlp. -o {run}".into(),
+                "modelbuilder job trunk-distill {model} --reference <hf-reference> --texts <texts.jsonl> --teacher {source} --trainable mlp. --lora-rank 16 -o {run}".into(),
                 crate::Produces::Gguf("{run}/{stem}-heal.gguf".into()),
-                "Distills the pruned model from the unpruned one, training the MLPs' full tensors (the paper uses QLoRA; there is no LoRA option yet).",
+                "Distills the pruned model from the unpruned one with LoRA on the MLPs (the paper heals with QLoRA on next-token loss).",
             ));
         }
         Ok(v)

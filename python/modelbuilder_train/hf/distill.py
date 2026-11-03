@@ -60,16 +60,43 @@ class Mode:
 
 
 class Switch(nn.Module):
-    """A parametrization: the original value for the teacher, the (fake-quantized) trained value for the student."""
+    """A parametrization: the original value for the teacher, the (fake-quantized) trained value for the student.
 
-    def __init__(self, original: torch.Tensor, mode: Mode, fmt: fakequant.WeightFormat | None) -> None:
+    With ``lora_rank`` the stored weight stays frozen (so it is also the
+    teacher's value and no copy is kept) and the student sees
+    ``fmt(w + scale · B·A)`` with trainable ``A`` [r, in] and ``B`` [out, r]
+    (``B = 0`` at the start, as in LoRA, Hu et al., 2021). Merged and
+    fake-quantized, that is exactly the tensor the write-back stores.
+    """
+
+    def __init__(
+        self,
+        original: torch.Tensor,
+        mode: Mode,
+        fmt: fakequant.WeightFormat | None,
+        lora_rank: int | None = None,
+        lora_alpha: float | None = None,
+    ) -> None:
         super().__init__()
-        self.register_buffer("original", original.detach().clone(), persistent=False)
         self.mode = mode
         self.fmt = fmt
+        self.lora = lora_rank is not None and original.ndim == 2
+        if self.lora:
+            out_f, in_f = original.shape
+            a = torch.empty(lora_rank, in_f, dtype=original.dtype, device=original.device)
+            nn.init.kaiming_uniform_(a, a=math.sqrt(5))
+            self.lora_a = nn.Parameter(a)
+            self.lora_b = nn.Parameter(torch.zeros(out_f, lora_rank, dtype=original.dtype, device=original.device))
+            self.scale = (lora_alpha if lora_alpha is not None else lora_rank) / lora_rank
+        else:
+            self.register_buffer("original", original.detach().clone(), persistent=False)
 
     def forward(self, w: torch.Tensor) -> torch.Tensor:
-        if not self.mode.student:
+        if self.lora:
+            if not self.mode.student:
+                return w
+            w = w + self.scale * (self.lora_b @ self.lora_a)
+        elif not self.mode.student:
             return self.original
         return self.fmt(w) if self.fmt is not None else w
 
@@ -156,6 +183,7 @@ def run_trunk_distill(
     if mla_cfg is not None:
         mla.attach(model, model_dir, mla_cfg, mode)
     trainable: dict[str, nn.Parameter] = {}
+    lora_params: list[nn.Parameter] = []
     model.requires_grad_(False)
     for mod_name, mod in list(model.named_modules()):
         for pname, p in list(mod.named_parameters(recurse=False)):
@@ -165,12 +193,20 @@ def run_trunk_distill(
             fmt = formats.get(full)
             if fmt is not None:
                 fmt = fakequant.resolve_signs(fmt, p.shape[-1], full)
-            parametrize.register_parametrization(mod, pname, Switch(p, mode, fmt))
-            orig = getattr(mod.parametrizations, pname).original
-            orig.requires_grad_(True)
-            trainable[full] = orig
+            sw = Switch(p, mode, fmt, stage.lora_rank, stage.lora_alpha)
+            parametrize.register_parametrization(mod, pname, sw)
+            plist = getattr(mod.parametrizations, pname)
+            if sw.lora:
+                plist[0].lora_a.requires_grad_(True)
+                plist[0].lora_b.requires_grad_(True)
+                lora_params += [plist[0].lora_a, plist[0].lora_b]
+            else:
+                plist.original.requires_grad_(True)
+            trainable[full] = plist.original
     if not trainable:
         raise ValueError(f"no parameter name contains any of {stage.trainable}")
+    # What the optimizer updates: the tensors themselves, or their LoRA factors.
+    params = lora_params + [p for p in trainable.values() if p.requires_grad]
 
     seqs = [s for s in load_sequences(resolve(stage.texts), model_dir) if len(s) >= 4]
     if not seqs:
@@ -213,7 +249,7 @@ def run_trunk_distill(
                 kl_sum, agree, count = kl_sum + float(k), agree + a, count + n
         return {"loss": kl_sum / max(count, 1), "accuracy": agree / max(count, 1), "tokens": count}
 
-    n_trainable = sum(p.numel() for p in trainable.values())
+    n_trainable = sum(p.numel() for p in params)
     ev.emit(
         "started",
         job_id=job_id,
@@ -222,7 +258,7 @@ def run_trunk_distill(
         train_tokens=sum(len(s) for s in train),
         eval_tokens=sum(len(s) for s in held),
     )
-    opt = torch.optim.AdamW(list(trainable.values()), lr=hyper.lr, weight_decay=hyper.weight_decay)
+    opt = torch.optim.AdamW(params, lr=hyper.lr, weight_decay=hyper.weight_decay)
     if held and dist.is_main():
         ev.emit("eval", step=0, **evaluate())
     tokens_seen, t0 = 0, time.time()
@@ -239,12 +275,12 @@ def run_trunk_distill(
             (k / n_targets).backward()
             kl_total, agree_total = kl_total + float(k.detach()), agree_total + a
         if dist.world() > 1:
-            for p in trainable.values():
+            for p in params:
                 if p.grad is not None:
                     torch.distributed.all_reduce(p.grad)
                     p.grad /= dist.world()
         if hyper.grad_clip:
-            torch.nn.utils.clip_grad_norm_(list(trainable.values()), hyper.grad_clip)
+            torch.nn.utils.clip_grad_norm_(params, hyper.grad_clip)
         opt.step()
         tokens_seen += n_targets * dist.world()
         if dist.is_main() and (step % hyper.log_every == 0 or step == hyper.steps):

@@ -117,3 +117,52 @@ def test_heal_a_pruned_model_against_the_original(tmp_path: Path) -> None:
     bad = mb("job", "trunk-distill", str(target), "--loss", "ce", "--teacher", str(target), "-o", str(run), *common,
              check=False)  # fmt: skip
     assert "drop --teacher" in bad
+
+
+def test_lora_switch_starts_at_the_original_and_trains_only_its_factors():
+    from torch.nn.utils import parametrize
+
+    from modelbuilder_train.hf.distill import Mode, Switch
+
+    torch.manual_seed(0)
+    lin = torch.nn.Linear(16, 8, bias=False)
+    w0 = lin.weight.detach().clone()
+    mode = Mode()
+    parametrize.register_parametrization(lin, "weight", Switch(lin.weight, mode, None, lora_rank=2, lora_alpha=4.0))
+    sw = lin.parametrizations.weight[0]
+    assert sw.lora and sw.scale == 2.0 and not hasattr(sw, "original")
+    assert torch.equal(lin.weight, w0)  # B = 0
+    with torch.no_grad():
+        sw.lora_b.fill_(0.1)
+    assert not torch.allclose(lin.weight, w0)
+    mode.student = False
+    assert torch.equal(lin.weight, w0)  # the teacher sees the frozen base
+
+
+@pytest.mark.skipif(not BIN.exists(), reason=f"no modelbuilder binary at {BIN}")
+def test_lora_trunk_distill_writes_back_exactly(tmp_path: Path) -> None:
+    pytest.importorskip("transformers")
+    target = Path(mb("fixture", "gguf-llama", str(tmp_path / "t")).strip())
+    texts = tmp_path / "t.jsonl"
+    texts.write_text(
+        "".join(json.dumps({"tokens": [(5 * i + 3 * j) % 96 for j in range(48)]}) + "\n" for i in range(8))
+    )
+    # Heal a pruned model (a real gap to close) with LoRA on the K/V projections.
+    pruned = tmp_path / "pruned.gguf"
+    mb("surgery", "prune", str(target), "--layers", "1..2", "-o", str(pruned))
+    run = tmp_path / "run"
+    out = mb(
+        "job", "trunk-distill", str(pruned), "--reference", str(target.parent), "--texts", str(texts),
+        "--teacher", str(target), "-o", str(run), "--kv-format", "q4_0", "--lora-rank", "4", "--steps", "10",
+        "--seq-len", "32", "--batch-seqs", "2", "--lr", "1e-2", "--eval-every", "10", "--log-every", "5",
+        "--device", "cpu", "--fp32", "--max-rel-error", "1e-4", "--raw-events", "--python", sys.executable,
+    )  # fmt: skip
+    events = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
+    assert events[-1]["event"] == "finished" and events[-1]["status"] == "ok"
+    started = next(e for e in events if e["event"] == "started")
+    # LoRA factors only: 1 layer × (K, V) × 4 × (64 + 32).
+    assert started["trainable_params"] == 2 * 4 * (64 + 32)
+    evals = [e for e in events if e["event"] == "eval"]
+    assert evals[-1]["loss"] < evals[0]["loss"], evals
+    assert json.loads((run / "job.json").read_text())["stages"][0]["trunk_distill"]["lora_rank"] == 4
+    assert "re-quantization error 0.000% RMS" in out

@@ -430,6 +430,7 @@ pub fn plan(p: &mb_plan::Plan) -> String {
                 for c in &f.compute {
                     let fits = match c.fits {
                         Fit::Yes => "yes",
+                        Fit::WithLora => "only with LoRA",
                         Fit::WithPackedTrunk => "only with packed trunk",
                         Fit::No => "no",
                         Fit::NotApplicable => "-",
@@ -500,6 +501,7 @@ pub fn plan(p: &mb_plan::Plan) -> String {
         for c in &p.schedule.totals {
             let fits = match c.fits {
                 Fit::Yes => "fits",
+                Fit::WithLora => "only with LoRA",
                 Fit::WithPackedTrunk => "only with packed trunk",
                 Fit::No => "doesn't fit",
                 Fit::NotApplicable => "-",

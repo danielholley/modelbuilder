@@ -133,6 +133,10 @@ pub struct TrunkDistillArgs {
     /// e.g. a long-context finetune).
     #[arg(long, default_value = "kl")]
     loss: String,
+    /// Train a rank-r LoRA update of each trainable tensor instead of the
+    /// tensor itself (less memory); it is merged before the write-back.
+    #[arg(long)]
+    lora_rank: Option<u32>,
     /// KV-cache format to train for: q8_0, q4_0 or nvfp4.
     #[arg(long)]
     kv_format: Option<String>,
@@ -568,6 +572,7 @@ fn trunk_distill(a: TrunkDistillArgs) -> Result<()> {
         weight_fakequant: !a.no_weight_fakequant,
         teacher,
         loss,
+        lora_rank: a.lora_rank,
         hardware_profile: a.hardware,
         device: parse_device(&a.device)?,
         hyper,

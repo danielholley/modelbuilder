@@ -137,6 +137,8 @@ pub struct ComputeEstimate {
     pub peak_gib_per_gpu: f64,
     /// Same, if the frozen trunk stays packed at the source bit width.
     pub peak_gib_per_gpu_packed_trunk: f64,
+    /// With a BF16 trunk, training rank-[`LORA_RANK`] LoRA factors instead of the trainable tensors.
+    pub peak_gib_per_gpu_lora: f64,
     /// GPU-hours to compute precomputed features (one trunk forward per token),
     /// separate from training; `None` when no stage precomputes.
     pub extraction_gpu_hours: Option<Range>,
@@ -151,12 +153,16 @@ pub enum Fit {
     /// No training needed.
     NotApplicable,
     Yes,
+    /// Only with LoRA on the trainable tensors (`trunk_distill --lora-rank`).
+    WithLora,
     /// Only if the frozen trunk stays packed low-bit during training.
     WithPackedTrunk,
     No,
 }
 
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+/// LoRA rank assumed for the memory fallback.
+pub const LORA_RANK: u64 = 16;
 /// Micro-batch size in tokens assumed for activation memory.
 pub const MICRO_BATCH_TOKENS: u64 = 4096;
 
@@ -175,6 +181,7 @@ pub fn cost_model_assumptions() -> Vec<String> {
         "Trainable params cost 16 B each (BF16 weight + FP32 master + two FP32 Adam moments); frozen params 2 B each in BF16.".into(),
         format!("Activations: {MICRO_BATCH_TOKENS}-token micro-batch with activation checkpointing (≈2 B × hidden × layers per token) plus chunked BF16 logits."),
         "Multi-GPU profiles shard weights and optimizer state evenly (FSDP-style).".into(),
+        format!("LoRA fallback: rank {LORA_RANK} factors on every trainable matrix (≈ 2·{LORA_RANK}/hidden of its params) take the optimizer state; the matrices stay frozen in BF16. Compute is priced as for full training (an upper bound)."),
         "Frozen stages with precomputed features pay one trunk forward per token at extraction (priced at the same utilization; it can run on other machines) and none in training.".into(),
     ]
 }
@@ -189,6 +196,7 @@ pub fn cost(inputs: &CostInputs, stages: &[Stage], hw: &HardwareProfile) -> Comp
             wall_hours: Range::zero(),
             peak_gib_per_gpu: 0.0,
             peak_gib_per_gpu_packed_trunk: 0.0,
+            peak_gib_per_gpu_lora: 0.0,
             extraction_gpu_hours: None,
             fits: Fit::NotApplicable,
             notes: vec!["No training stages.".into()],
@@ -198,6 +206,7 @@ pub fn cost(inputs: &CostInputs, stages: &[Stage], hw: &HardwareProfile) -> Comp
     let mut flops = Range::zero();
     let mut peak_bf16: f64 = 0.0;
     let mut peak_packed: f64 = 0.0;
+    let mut peak_lora: f64 = 0.0;
     let mut extraction = Range::zero();
     let mut extracts = false;
     for s in stages {
@@ -240,6 +249,11 @@ pub fn cost(inputs: &CostInputs, stages: &[Stage], hw: &HardwareProfile) -> Comp
         peak_bf16 = peak_bf16.max(((frozen * 2.0 + state) / g + act) / GIB);
         peak_packed =
             peak_packed.max(((frozen * inputs.source_bits / 8.0 + state) / g + act) / GIB);
+        // LoRA: the trainable matrices join the frozen weights; the factors carry
+        // the optimizer state, and the teacher reads the unchanged base (no copy).
+        let lora =
+            (trainable * 2.0 * LORA_RANK as f64 / inputs.hidden.max(1) as f64).min(trainable);
+        peak_lora = peak_lora.max((((frozen + trainable) * 2.0 + lora * 16.0) / g + act) / GIB);
     }
     let per_gpu = hw.peak_tflops * 1e12;
     let hours = |f: Range| {
@@ -252,6 +266,8 @@ pub fn cost(inputs: &CostInputs, stages: &[Stage], hw: &HardwareProfile) -> Comp
     let usable = hw.usable_gib_per_gpu();
     let fits = if peak_bf16 <= usable {
         Fit::Yes
+    } else if peak_lora <= usable {
+        Fit::WithLora
     } else if peak_packed <= usable {
         Fit::WithPackedTrunk
     } else {
@@ -259,6 +275,9 @@ pub fn cost(inputs: &CostInputs, stages: &[Stage], hw: &HardwareProfile) -> Comp
     };
     let mut notes = Vec::new();
     match fits {
+        Fit::WithLora => notes.push(format!(
+            "Needs {peak_bf16:.0} GiB/GPU to train the tensors themselves; fits ({peak_lora:.0} GiB) with rank-{LORA_RANK} LoRA on them (`--lora-rank {LORA_RANK}`)."
+        )),
         Fit::WithPackedTrunk => notes.push(format!(
             "Needs {peak_bf16:.0} GiB/GPU with a BF16 trunk; fits ({peak_packed:.0} GiB) only if the frozen trunk stays packed at {:.2} bits, which needs low-bit training kernels the HF backend doesn't have yet.",
             inputs.source_bits
@@ -275,6 +294,7 @@ pub fn cost(inputs: &CostInputs, stages: &[Stage], hw: &HardwareProfile) -> Comp
         wall_hours: gpu_hours.map(|h| h / f64::from(hw.gpus)),
         peak_gib_per_gpu: peak_bf16,
         peak_gib_per_gpu_packed_trunk: peak_packed,
+        peak_gib_per_gpu_lora: peak_lora,
         extraction_gpu_hours: extracts.then(|| hours(extraction)),
         fits,
         notes,
@@ -284,7 +304,7 @@ pub fn cost(inputs: &CostInputs, stages: &[Stage], hw: &HardwareProfile) -> Comp
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hardware::profile;
+    use crate::hardware::{profile, HardwareProfile};
 
     fn inputs() -> CostInputs {
         CostInputs {
@@ -329,6 +349,28 @@ mod tests {
         assert!(online.extraction_gpu_hours.is_none());
         // Memory: the trunk isn't resident, only the embedding and the backprop path.
         assert!(pre.peak_gib_per_gpu < online.peak_gib_per_gpu);
+    }
+
+    #[test]
+    fn lora_is_the_fallback_when_full_training_does_not_fit() {
+        // A 1B model, every parameter trainable: 16 GB of optimizer state.
+        let n = 1_000_000_000u64;
+        let c = cost(
+            &inputs(),
+            &[stage(n, n, 1e8, false)],
+            profile("1x24GB").unwrap(),
+        );
+        assert!(c.peak_gib_per_gpu > 14.0, "{}", c.peak_gib_per_gpu);
+        // With rank-16 LoRA: 2 GB of BF16 weights plus factors (1.6% of the params).
+        assert!(c.peak_gib_per_gpu_lora < 4.0, "{}", c.peak_gib_per_gpu_lora);
+        let small = profile("1x24GB").unwrap();
+        let tight = HardwareProfile {
+            mem_per_gpu_gib: 10.0,
+            ..small.clone()
+        };
+        let c = cost(&inputs(), &[stage(n, n, 1e8, false)], &tight);
+        assert_eq!(c.fits, Fit::WithLora);
+        assert!(c.notes[0].contains("--lora-rank 16"), "{:?}", c.notes);
     }
 
     #[test]

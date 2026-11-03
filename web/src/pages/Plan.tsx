@@ -7,6 +7,7 @@ import { bytes, count, range } from "../lib/format";
 
 const FIT: Record<Fit, [Tone, string]> = {
   yes: ["good", "fits"],
+  with_lora: ["warning", "fits with LoRA"],
   with_packed_trunk: ["warning", "fits with packed trunk"],
   no: ["critical", "doesn't fit"],
   not_applicable: ["neutral", "n/a"],
