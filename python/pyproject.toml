@@ -11,7 +11,7 @@ dependencies = ["pydantic>=2", "numpy", "safetensors"]
 # at https://pytorch.org, or use this extra for the default build.
 torch = ["torch>=2.2"]
 # The `trunk_distill` stage and HF probes (attention interface, `dtype=` loading).
-hf = ["transformers>=4.56", "safetensors"]
+hf = ["transformers>=4.56", "safetensors", "accelerate"]
 dev = ["pytest", "ruff", "jsonschema"]
 # The mlx backend (Apple Silicon; also runs on Linux CPUs with `mlx[cpu]`).
 mlx = ["mlx>=0.25"]

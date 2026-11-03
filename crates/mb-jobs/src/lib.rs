@@ -183,6 +183,9 @@ pub struct TrunkDistill {
     pub teacher: Option<String>,
     #[serde(default, skip_serializing_if = "is_default")]
     pub loss: DistillLoss,
+    /// Spread the model over the process's GPUs: `auto`, `balanced` or `sequential`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_map: Option<String>,
     /// Train a rank-r LoRA update of each trainable tensor (merged before write-back).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora_rank: Option<u32>,
@@ -343,6 +346,15 @@ impl JobSpec {
                 (StageKind::TrunkDistill, Some(t)) => {
                     if t.trainable.is_empty() {
                         return bad(format!("stage {}: trainable is empty", s.name));
+                    }
+                    if t.device_map
+                        .as_deref()
+                        .is_some_and(|m| !matches!(m, "auto" | "balanced" | "sequential"))
+                    {
+                        return bad(format!(
+                            "stage {}: device_map must be auto, balanced or sequential",
+                            s.name
+                        ));
                     }
                     if t.lora_rank == Some(0)
                         || t.lora_alpha.is_some_and(|a| a.is_nan() || a <= 0.0)
@@ -643,6 +655,7 @@ pub struct TrunkDistillInputs {
     pub teacher: Option<PathBuf>,
     pub loss: DistillLoss,
     pub lora_rank: Option<u32>,
+    pub device_map: Option<String>,
     pub hardware_profile: Option<String>,
     pub device: Device,
     pub hyper: Hyper,
@@ -690,6 +703,7 @@ pub fn trunk_distill_spec(i: TrunkDistillInputs) -> JobSpec {
                 weight_fakequant: i.weight_fakequant,
                 teacher: i.teacher.as_deref().map(s),
                 loss: i.loss,
+                device_map: i.device_map,
                 lora_rank: i.lora_rank,
                 lora_alpha: None,
                 eval_fraction: 0.05,

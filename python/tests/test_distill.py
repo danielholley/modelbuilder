@@ -166,3 +166,31 @@ def test_lora_trunk_distill_writes_back_exactly(tmp_path: Path) -> None:
     assert evals[-1]["loss"] < evals[0]["loss"], evals
     assert json.loads((run / "job.json").read_text())["stages"][0]["trunk_distill"]["lora_rank"] == 4
     assert "re-quantization error 0.000% RMS" in out
+
+
+@pytest.mark.skipif(not BIN.exists(), reason=f"no modelbuilder binary at {BIN}")
+def test_device_map_path_with_a_teacher(tmp_path: Path) -> None:
+    """``device_map`` loads through accelerate; on a CPU-only machine everything lands on the CPU."""
+    pytest.importorskip("accelerate")
+    target = Path(mb("fixture", "gguf-llama", str(tmp_path / "t")).strip())
+    pruned = tmp_path / "pruned.gguf"
+    mb("surgery", "prune", str(target), "--layers", "1..2", "-o", str(pruned))
+    texts = tmp_path / "t.jsonl"
+    texts.write_text(
+        "".join(json.dumps({"tokens": [(5 * i + 3 * j) % 96 for j in range(48)]}) + "\n" for i in range(8))
+    )
+    run = tmp_path / "run"
+    out = mb(
+        "job", "trunk-distill", str(pruned), "--reference", str(target.parent), "--texts", str(texts),
+        "--teacher", str(target), "--device-map", "auto", "--trainable", "mlp.", "-o", str(run), "--steps", "6",
+        "--seq-len", "32", "--batch-seqs", "2", "--lr", "3e-3", "--eval-every", "6", "--log-every", "3",
+        "--fp32", "--raw-events", "--python", sys.executable,
+    )  # fmt: skip
+    events = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
+    assert events[-1]["event"] == "finished" and events[-1]["status"] == "ok"
+    evals = [e for e in events if e["event"] == "eval"]
+    assert evals[-1]["loss"] < evals[0]["loss"], evals
+    assert json.loads((run / "job.json").read_text())["stages"][0]["trunk_distill"]["device_map"] == "auto"
+    bad = mb("job", "trunk-distill", str(pruned), "--reference", str(target.parent), "--texts", str(texts),
+             "--device-map", "everywhere", "-o", str(tmp_path / "bad"), "--emit-only", check=False)  # fmt: skip
+    assert "device_map" in bad

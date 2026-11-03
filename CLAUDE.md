@@ -213,8 +213,9 @@ TOML), Jobs (start or follow a job, live curves over SSE).
   A KV-cache fake-quantizer and cross-layer sharing are registered as an
   attention implementation, MLA is switched in by hooks (`hf/mla.py`), and
   weights are fake-quantized through their source format, optionally as a
-  LoRA update merged inside the parametrization (`hf/`). One device per
-  process for now; FSDP or a model-parallel trunk is planned.
+  LoRA update merged inside the parametrization (`hf/`). `device_map`
+  spreads the model (and a teacher) over one machine's GPUs; there is no
+  FSDP across processes yet.
 - `mlx` ✅ (partial): `mtp_align` with the head in MLX
   (`mtp/mlx_model.py`, `backends/mlx_backend.py`), checked against the
   PyTorch head. Other stages run on the `torch` backend (MPS on Apple GPUs).

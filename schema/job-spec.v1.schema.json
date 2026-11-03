@@ -309,6 +309,15 @@
           "default": "kl",
           "description": "kl: KL to the teacher's next-token distribution; ce: next-token cross-entropy on the texts (no teacher), e.g. a long-context finetune."
         },
+        "device_map": {
+          "enum": [
+            "auto",
+            "balanced",
+            "sequential",
+            null
+          ],
+          "description": "Spread the model (and a teacher) layer by layer over this process's GPUs (transformers/accelerate device_map), for models that don't fit on one."
+        },
         "lora_rank": {
           "type": [
             "integer",

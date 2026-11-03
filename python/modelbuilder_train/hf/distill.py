@@ -136,7 +136,7 @@ def kl_and_agreement(
     for a in range(0, n, LOGIT_CHUNK):
         s = lm_head(student_h[a : a + LOGIT_CHUNK]).float()
         with torch.no_grad():
-            t = teacher_head(teacher_h[a : a + LOGIT_CHUNK].to(s.device)).float()
+            t = teacher_head(teacher_h[a : a + LOGIT_CHUNK]).float().to(s.device)
         tp = F.log_softmax(t, -1)
         total = total + F.kl_div(F.log_softmax(s, -1), tp, log_target=True, reduction="sum")
         agree += int((s.argmax(-1) == t.argmax(-1)).sum())
@@ -155,15 +155,23 @@ def run_trunk_distill(
     if hyper.dtype == "bfloat16" and not use_bf16:
         print(f"{device} has no fast bf16: training in float32", file=sys.stderr)
     attention.register()
-    model = AutoModelForCausalLM.from_pretrained(
-        model_dir, dtype=torch.bfloat16 if use_bf16 else torch.float32, attn_implementation=attention.NAME
-    ).to(device)
+    dtype = torch.bfloat16 if use_bf16 else torch.float32
+
+    def load(path: Path, **kw):
+        """On ``device``, or with ``device_map`` spread layer by layer over this process's GPUs."""
+        if stage.device_map is None:
+            return AutoModelForCausalLM.from_pretrained(path, dtype=dtype, **kw).to(device)
+        if dist.world() > 1:
+            raise ValueError("device_map splits one model over a process's GPUs; run one process, not torchrun")
+        return AutoModelForCausalLM.from_pretrained(path, dtype=dtype, device_map=stage.device_map, **kw)
+
+    model = load(model_dir, attn_implementation=attention.NAME)
+    if stage.device_map is not None:
+        device = model.get_input_embeddings().weight.device  # where the token ids go
     model.train()
     teacher = None
     if stage.teacher and stage.loss == "kl":
-        teacher = AutoModelForCausalLM.from_pretrained(
-            resolve(stage.teacher), dtype=torch.bfloat16 if use_bf16 else torch.float32
-        ).to(device)
+        teacher = load(resolve(stage.teacher))
         teacher.eval().requires_grad_(False)
         tv, sv = teacher.get_output_embeddings().weight.shape[0], model.get_output_embeddings().weight.shape[0]
         if tv != sv:
@@ -222,7 +230,8 @@ def run_trunk_distill(
         behavior.enabled = student
         behavior.reset()
         if not student and teacher is not None:
-            return teacher.get_decoder()(input_ids=ids[None]).last_hidden_state[0]
+            tdev = teacher.get_input_embeddings().weight.device
+            return teacher.get_decoder()(input_ids=ids[None].to(tdev)).last_hidden_state[0]
         return decoder(input_ids=ids[None]).last_hidden_state[0]
 
     teacher_head = teacher.get_output_embeddings() if teacher is not None else None
@@ -230,7 +239,8 @@ def run_trunk_distill(
     def losses(ids: torch.Tensor) -> tuple[torch.Tensor, int, int]:
         """Summed loss, top-1 agreements (or hits), positions."""
         if stage.loss == "ce":
-            return ce_and_accuracy(pass_(ids, True)[:-1], ids[1:], lm_head)
+            s = pass_(ids, True)
+            return ce_and_accuracy(s[:-1], ids[1:].to(s.device), lm_head)
         with torch.no_grad():
             t = pass_(ids, False)
         return kl_and_agreement(pass_(ids, True), t, lm_head, teacher_head)

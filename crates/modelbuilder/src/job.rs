@@ -140,6 +140,10 @@ pub struct TrunkDistillArgs {
     /// tensor itself (less memory); it is merged before the write-back.
     #[arg(long)]
     lora_rank: Option<u32>,
+    /// Spread the model (and a teacher) layer by layer over this machine's
+    /// GPUs: auto, balanced or sequential (one process; needs `accelerate`).
+    #[arg(long)]
+    device_map: Option<String>,
     /// KV-cache format to train for: q8_0, q4_0 or nvfp4.
     #[arg(long)]
     kv_format: Option<String>,
@@ -582,6 +586,7 @@ fn trunk_distill(a: TrunkDistillArgs) -> Result<()> {
         teacher,
         loss,
         lora_rank: a.lora_rank,
+        device_map: a.device_map,
         hardware_profile: a.hardware,
         device: parse_device(&a.device)?,
         hyper,

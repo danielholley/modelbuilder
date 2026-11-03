@@ -60,7 +60,10 @@ speculative decoding and **DeepSeek-V4.1-Flash-style KV cache changes**.
     original);
   - `loss = "ce"`: next-token training on the texts (long-context finetunes);
   - `lora_rank`: LoRA factors inside the fake-quant parametrization, so the
-    merged tensor still writes back exactly.
+    merged tensor still writes back exactly;
+  - `device_map`: the model and teacher spread layer by layer over one
+    machine's GPUs (accelerate), for trunks that don't fit on one device.
+    Only the CPU path is tested here.
 
   `export-hf` writes a GGUF's YaRN scaling into the HF config, so a finetune
   after `surgery yarn` trains with the scaling transformers applies.
@@ -111,7 +114,7 @@ python -m modelbuilder_train generate-corpus | extract-features | run | validate
 
 ### Test coverage
 
-104 Rust tests, 72 Python tests (including end-to-end runs through the Rust
+104 Rust tests, 73 Python tests (including end-to-end runs through the Rust
 binary on fixtures: MTP alignment, KV QAT, MLA recovery, healing a pruned
 model against its original, LoRA write-back, draft heads) and 7 web tests,
 all in CI. Every test uses tiny synthetic checkpoints; nothing downloads a
@@ -143,9 +146,9 @@ These need hardware, data or runtime code that isn't in this repository:
   needs calibration activations; only the data-free choices exist.
 - **Backends**: `mlx` runs `mtp_align` only (other stages use torch on MPS),
   and there is no multi-node pretraining backend (`torchtitan`), which
-  continued pretraining at upcycling scale needs. The `hf` stage runs on one device
-  per process (DDP over gradients); there is no FSDP or model-parallel trunk
-  yet, so a 27B trunk needs one device that holds it.
+  continued pretraining at upcycling scale needs. The `hf` stage spreads a trunk over
+  one machine's GPUs (`device_map`, untested on real GPUs) or runs DDP with a
+  full copy per process; there is no FSDP across processes.
 
 ## Next
 
@@ -153,8 +156,8 @@ These need hardware, data or runtime code that isn't in this repository:
    revised order below).
 2. Verify `surgery upcycle` in llama.cpp on a small dense model (logits equal
    to the dense model's before training), then check the `qwen35moe` loader.
-3. A sharded trunk for `trunk_distill` (FSDP2 or a device map), so
-   restructuring stages fit on several smaller GPUs.
+3. Try `trunk_distill --device-map auto` on a multi-GPU machine, and FSDP2
+   for multi-node restructuring runs.
 
 ## Target hardware (the user's cluster)
 
