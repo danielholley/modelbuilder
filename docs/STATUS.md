@@ -127,6 +127,17 @@ python -m modelbuilder_train generate-corpus | extract-features | run | validate
 - **Training pipeline:** the PyTorch head on llama.cpp features scores 76.0%
   t+2 top-1 over 337 targets (84.4% on generated tokens only). Again, the no-+1
   control scores 0% ([`mtp-align.md`](research/mtp-align.md)).
+- **`export-hf` per tensor** (2026-11-03): layers 0–3 of the PQ2_0 GGUF
+  (three DeltaNet layers and one gated-attention layer, 53 tensors) exported
+  with `export-hf --layers 0..4 --no-globals --dtype f32` and compared with
+  the same tensors of Qwen3.8-27B (fetched by range with
+  `modelbuilder_train fetch-tensors`). Every ternary matrix is at cosine
+  0.883–0.898, the level of the ternary QAT itself; `A_log` and `dt_bias`
+  are at 1.0000 (the `-exp` inverse is right), `conv1d` at 0.995 and
+  `in_proj_a/b` at ≥ 0.97 (the V-head reorder is right), and every norm at
+  ≥ 0.987 (the +1 offset is removed). A transform or permutation error would
+  collapse those numbers. The llama.cpp side (`probe hf-vs-gguf`) is still
+  to run.
 - **Dashboards:** the web UI was driven in a browser on the real GGUF. A
   training run was started from the Jobs page and followed to completion. The
   TUI was run in a real terminal on the model and on a training job.
@@ -145,7 +156,8 @@ These need hardware, data or runtime code that isn't in this repository:
 
 - **Real-model checks of the newer pipeline** (steps in
   [`verify-export-and-kv-qat.md`](runbooks/verify-export-and-kv-qat.md)):
-  - `probe hf-vs-gguf` on a pruned copy of the target (about 17 GB of disk);
+  - `probe hf-vs-gguf` on a pruned copy of the target (about 17 GB of disk;
+    the per-tensor check against Qwen3.8-27B is done);
   - a `trunk_distill` run on GPUs;
   - the quantized-KV measurement (`probe kv-cache`), which decides whether
     KV QAT is worth its cost on the target.
@@ -228,9 +240,9 @@ What that changes:
 5. ✅ The [runbook](runbooks/bonsai2-mtp.md) and `bench-draft`. On the real
    model the ported head accepts 20 of 23 drafts on a code prompt, a 1.93×
    speedup on CPU.
-6. Verify `export-hf` on the real model (per-tensor cosine against
-   Qwen3.8-27B; hidden states against llama.cpp with `probe hf-vs-gguf`).
-   `export-hf` itself is done and loads in transformers on fixtures.
+6. Verify `export-hf` on the real model. ✅ Per-tensor cosine against
+   Qwen3.8-27B (see *Measured on the real model*); hidden states against
+   llama.cpp with `probe hf-vs-gguf` still to run.
 7. ✅ Stage ordering in the planner, and now the pipeline of commands.
 8. Measure quantized-KV quality (`probe kv-cache`: perplexity, long-context
    retrieval), then decide on QAT.

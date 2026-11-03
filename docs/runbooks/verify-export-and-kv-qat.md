@@ -4,6 +4,21 @@ Notes for the first target (`prism-ml/Ternary-Bonsai-2-27B-gguf`, 64 layers
 in a period-4 pattern of 3 DeltaNet + 1 gated attention, 248K vocabulary).
 The commands are generic; only the paths and numbers here are specific to it.
 
+## 0. Per-tensor check against the base model (no llama.cpp needed)
+
+Done on 2026-11-03 (results in `docs/STATUS.md`). Fetch only the base
+model's first layers, export the same layers, and compare:
+
+```sh
+python -m modelbuilder_train fetch-tensors --repo Qwen/Qwen3.8-27B \
+  --pattern '^model\.language_model\.layers\.[0-3]\.' --out models/qwen38-l0-3   # ≈ 2.9 GB
+modelbuilder export-hf $M --reference models/qwen38-l0-3 --layers 0..4 --no-globals --dtype f32 -o runs/verify/hf-l0-3
+```
+
+Then compute the cosine of each exported tensor with the reference's
+(`model.layers.N.*` ↔ `model.language_model.layers.N.*`). Ternary matrices
+land near 0.89; small tensors (norms, `A_log`, `dt_bias`, `conv1d`) near 1.
+
 ## 1. Check `export-hf` against llama.cpp on a pruned copy
 
 A full fp32 export is about 108 GB. A 4-layer copy is enough to check every
@@ -55,8 +70,11 @@ modelbuilder job run runs/kv-q4/job.json      # on the GPU machine
 modelbuilder surgery replace $M --updates runs/kv-q4/updates -o runs/kv-q4/target-kv-q4.gguf --max-rel-error 1e-3
 ```
 
-The stage loads the whole trunk on one device: about 108 GB in fp32, or about
-54 GB plus activations in bf16 on Ampere or newer. That rules out the P40
-servers (no bf16, 24 GB each) until the stage gets FSDP. Trained tensors go
+By default the stage loads the whole trunk on one device: about 108 GB in
+fp32, or about 54 GB plus activations in bf16 on Ampere or newer.
+`--device-map auto` spreads it over one machine's GPUs, and `--shard fsdp`
+over several machines, but FSDP trains plain tensors (no weight fake-quant),
+so a PQ2_0 write-back then re-quantizes with a real error. On the P40
+servers (no bf16, 96 GB per server) the fp32 trunk needs both servers. Trained tensors go
 through PQ2_0 in the rotated basis during training, so the write-back
 re-encodes them exactly (check the reported re-quantization error).
