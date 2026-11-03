@@ -28,6 +28,9 @@ pub enum JobOp {
     /// them back into a copy of the GGUF in their original types. Exports the
     /// target as an HF checkpoint first (`export-hf`).
     TrunkDistill(Box<TrunkDistillArgs>),
+    /// Train a Medusa or EAGLE drafter against a frozen target from trunk
+    /// features (as for `mtp-align`). Writes the drafter as safetensors.
+    DraftAlign(Box<DraftAlignArgs>),
     /// Run an existing job spec (job.json) and render its events.
     Run {
         spec: PathBuf,
@@ -164,6 +167,58 @@ pub struct TrunkDistillArgs {
     py: PythonArgs,
 }
 
+#[derive(Args)]
+pub struct DraftAlignArgs {
+    /// Target model (.gguf).
+    target: PathBuf,
+    /// medusa or eagle.
+    #[arg(long)]
+    kind: String,
+    /// Trunk feature directory computed from the target.
+    #[arg(long)]
+    features: PathBuf,
+    /// EAGLE: HF directory with the target's config.json (e.g. its base model).
+    #[arg(long)]
+    reference: Option<PathBuf>,
+    /// Medusa: number of heads.
+    #[arg(long, default_value_t = 4)]
+    heads: u32,
+    /// EAGLE: decoder layers.
+    #[arg(long, default_value_t = 1)]
+    blocks: u32,
+    /// Medusa: reuse the frozen LM head instead of training a copy per head.
+    #[arg(long)]
+    share_lm_head: bool,
+    #[arg(long, short = 'o')]
+    out: PathBuf,
+    #[arg(long, default_value = "auto")]
+    device: String,
+    #[arg(long)]
+    hardware: Option<String>,
+    #[arg(long)]
+    steps: Option<u64>,
+    #[arg(long)]
+    lr: Option<f64>,
+    #[arg(long)]
+    seq_len: Option<u64>,
+    #[arg(long)]
+    batch_seqs: Option<u64>,
+    #[arg(long)]
+    warmup_steps: Option<u64>,
+    #[arg(long)]
+    eval_every: Option<u64>,
+    #[arg(long)]
+    log_every: Option<u64>,
+    #[arg(long)]
+    fp32: bool,
+    #[arg(long)]
+    emit_only: bool,
+    #[arg(long)]
+    force: bool,
+    #[command(flatten)]
+    py: PythonArgs,
+}
+
 const FROZEN: &str = "frozen.safetensors";
 const EMBED: &str = "token_embd.weight";
 const OUTPUT: &str = "output.weight";
@@ -178,6 +233,7 @@ pub fn run(op: JobOp) -> Result<()> {
         }
         JobOp::MtpAlign(a) => mtp_align(*a),
         JobOp::TrunkDistill(a) => trunk_distill(*a),
+        JobOp::DraftAlign(a) => draft_align(*a),
     }
 }
 
@@ -189,6 +245,57 @@ fn open(p: &Path) -> Result<(mb_formats::LoadedModel, ModelIr)> {
 
 fn absolute(p: &Path) -> Result<PathBuf> {
     std::fs::canonicalize(p).with_context(|| format!("{} not found", p.display()))
+}
+
+/// Decodes the frozen embedding and LM head (primal basis) into `out/frozen.safetensors`.
+/// Returns the LM head's tensor name (the embedding when tied).
+fn export_frozen(
+    target: &mb_formats::LoadedModel,
+    target_ir: &ModelIr,
+    out: &Path,
+    force: bool,
+) -> Result<&'static str> {
+    // Frozen pieces for the loss: decoded and in the primal basis.
+    let lm_head = if target.tensor(OUTPUT).is_some() {
+        OUTPUT
+    } else {
+        EMBED
+    };
+    let mut names = vec![EMBED.to_string()];
+    if lm_head != EMBED {
+        names.push(lm_head.to_string());
+    }
+    let frozen = out.join(FROZEN);
+    if frozen.exists() && !force {
+        println!(
+            "using existing {} (pass --force to re-export)",
+            frozen.display()
+        );
+    } else {
+        let opts = mb_surgery::export::ExportOptions {
+            names,
+            dtype: mb_ir::DType::Bf16,
+            overwrite: true,
+        };
+        let report = mb_surgery::export::export_primal(target, target_ir, &frozen, &opts)?;
+        println!(
+            "exported {} ({}) to {}",
+            report
+                .tensors
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            if target_ir.weight_rotation.is_some() {
+                "rotation undone"
+            } else {
+                "decoded"
+            },
+            frozen.display()
+        );
+    }
+
+    Ok(lm_head)
 }
 
 fn mtp_align(a: MtpAlignArgs) -> Result<()> {
@@ -207,45 +314,7 @@ fn mtp_align(a: MtpAlignArgs) -> Result<()> {
     std::fs::create_dir_all(&a.out)?;
     let out = absolute(&a.out)?;
 
-    // Frozen pieces for the loss: decoded and in the primal basis.
-    let lm_head = if target.tensor(OUTPUT).is_some() {
-        OUTPUT
-    } else {
-        EMBED
-    };
-    let mut names = vec![EMBED.to_string()];
-    if lm_head != EMBED {
-        names.push(lm_head.to_string());
-    }
-    let frozen = out.join(FROZEN);
-    if frozen.exists() && !a.force {
-        println!(
-            "using existing {} (pass --force to re-export)",
-            frozen.display()
-        );
-    } else {
-        let opts = mb_surgery::export::ExportOptions {
-            names,
-            dtype: mb_ir::DType::Bf16,
-            overwrite: true,
-        };
-        let report = mb_surgery::export::export_primal(&target, &target_ir, &frozen, &opts)?;
-        println!(
-            "exported {} ({}) to {}",
-            report
-                .tensors
-                .iter()
-                .map(|t| t.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", "),
-            if target_ir.weight_rotation.is_some() {
-                "rotation undone"
-            } else {
-                "decoded"
-            },
-            frozen.display()
-        );
-    }
+    let lm_head = export_frozen(&target, &target_ir, &out, a.force)?;
 
     let mut hyper = Hyper::mtp_align_default();
     macro_rules! set {
@@ -501,6 +570,86 @@ fn trunk_distill(a: TrunkDistillArgs) -> Result<()> {
     };
     let report = mb_surgery::replace::replace_tensors(&target, &target_ir, &u, &new, &opts)?;
     print!("\n{}", render::surgery(&report));
+    Ok(())
+}
+
+fn draft_align(a: DraftAlignArgs) -> Result<()> {
+    let kind = match a.kind.as_str() {
+        "medusa" => mb_jobs::DraftKind::Medusa,
+        "eagle" => mb_jobs::DraftKind::Eagle,
+        k => bail!("unknown drafter kind {k}; use medusa or eagle"),
+    };
+    let reference_config = match (&a.reference, kind) {
+        (Some(r), _) => Some(absolute(&r.join("config.json"))?),
+        (None, mb_jobs::DraftKind::Eagle) => {
+            bail!("an EAGLE drafter needs --reference <hf-dir> for the decoder layer's shape")
+        }
+        (None, _) => None,
+    };
+    if !has_manifest(&a.features) {
+        bail!(
+            "{} is not a feature directory (no manifest.json)",
+            a.features.display()
+        );
+    }
+    let (target, target_ir) = open(&a.target)?;
+    std::fs::create_dir_all(&a.out)?;
+    let out = absolute(&a.out)?;
+    let lm_head = export_frozen(&target, &target_ir, &out, a.force)?;
+    let mut hyper = Hyper::mtp_align_default();
+    hyper.lr = 1e-3;
+    macro_rules! set {
+        ($($f:ident),*) => { $(if let Some(v) = a.$f { hyper.$f = v; })* };
+    }
+    set!(
+        steps,
+        lr,
+        seq_len,
+        batch_seqs,
+        warmup_steps,
+        eval_every,
+        log_every
+    );
+    hyper.warmup_steps = hyper.warmup_steps.min(hyper.steps / 2);
+    hyper.eval_every = hyper.eval_every.min(hyper.steps);
+    if a.fp32 {
+        hyper.dtype = TrainDtype::Float32;
+    }
+    let spec = mb_jobs::draft_align_spec(mb_jobs::DraftAlignInputs {
+        job_id: format!("{}-align-{}", a.kind, stem(&a.target)),
+        output_dir: ".".into(),
+        draft: mb_jobs::DraftAlign {
+            kind,
+            heads: a.heads,
+            blocks: a.blocks,
+            share_lm_head: a.share_lm_head,
+            reference_config: reference_config.map(|p| p.display().to_string()),
+            frozen_tensors: FROZEN.into(),
+            embedding_tensor: EMBED.into(),
+            lm_head_tensor: lm_head.into(),
+            features: absolute(&a.features)?.display().to_string(),
+            eval_fraction: 0.05,
+        },
+        hardware_profile: a.hardware,
+        device: parse_device(&a.device)?,
+        hyper,
+    });
+    let spec_path = out.join("job.json");
+    spec.write(&spec_path)?;
+    println!("wrote {}", spec_path.display());
+    if a.emit_only {
+        println!(
+            "\nRun it with:\n  modelbuilder job run {}",
+            spec_path.display()
+        );
+        return Ok(());
+    }
+    let outputs = launch(&spec_path, &a.py)?;
+    print_outputs(&outputs);
+    println!(
+        "\nThe drafter is in safetensors form; llama.cpp has no Medusa or EAGLE-1 loader for it, \
+         so serve it with a runtime that does (e.g. vLLM) or use the MTP path for GGUF targets."
+    );
     Ok(())
 }
 

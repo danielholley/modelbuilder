@@ -72,7 +72,8 @@
         "kind": {
           "enum": [
             "mtp_align",
-            "trunk_distill"
+            "trunk_distill",
+            "draft_align"
           ]
         },
         "mtp_align": {
@@ -83,6 +84,9 @@
         },
         "trunk_distill": {
           "$ref": "#/$defs/trunk_distill"
+        },
+        "draft_align": {
+          "$ref": "#/$defs/draft_align"
         }
       },
       "allOf": [
@@ -111,6 +115,20 @@
           "then": {
             "required": [
               "trunk_distill"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "draft_align"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "draft_align"
             ]
           }
         }
@@ -279,6 +297,87 @@
           "minimum": 0,
           "maximum": 0.5,
           "default": 0.05
+        }
+      }
+    },
+    "draft_align": {
+      "description": "Train a Medusa or EAGLE drafter against a frozen target from precomputed trunk hidden states.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "frozen_tensors",
+        "embedding_tensor",
+        "lm_head_tensor",
+        "features"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "medusa",
+            "eagle"
+          ]
+        },
+        "heads": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 4,
+          "description": "Medusa: number of heads (head k predicts token t+k+1)."
+        },
+        "blocks": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1,
+          "description": "EAGLE: decoder layers."
+        },
+        "share_lm_head": {
+          "type": "boolean",
+          "default": false,
+          "description": "Medusa: reuse the frozen LM head instead of a trainable copy per head."
+        },
+        "reference_config": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "EAGLE (required): the target's HF config.json, for the decoder layer's shape."
+        },
+        "frozen_tensors": {
+          "type": "string",
+          "description": "safetensors with the target's token embedding and output head in the primal basis (modelbuilder export-tensors)."
+        },
+        "embedding_tensor": {
+          "type": "string"
+        },
+        "lm_head_tensor": {
+          "type": "string"
+        },
+        "features": {
+          "type": "string",
+          "description": "Feature directory from modelbuilder_train extract-features."
+        },
+        "eval_fraction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 0.5,
+          "default": 0.05
+        }
+      },
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "eagle"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "reference_config"
+        ],
+        "properties": {
+          "reference_config": {
+            "type": "string"
+          }
         }
       }
     }

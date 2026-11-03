@@ -48,19 +48,41 @@ class TrunkDistill(_Strict):
     eval_fraction: float = Field(default=0.05, ge=0, le=0.5)
 
 
+class DraftAlign(_Strict):
+    kind: Literal["medusa", "eagle"]
+    heads: int = Field(default=4, ge=1)
+    blocks: int = Field(default=1, ge=1)
+    share_lm_head: bool = False
+    reference_config: str | None = None
+    frozen_tensors: str
+    embedding_tensor: str
+    lm_head_tensor: str
+    features: str
+    eval_fraction: float = Field(default=0.05, ge=0, le=0.5)
+
+    @model_validator(mode="after")
+    def _eagle_shape(self) -> DraftAlign:
+        if self.kind == "eagle" and self.reference_config is None:
+            raise ValueError("an EAGLE drafter needs reference_config")
+        return self
+
+
+KINDS = ("mtp_align", "trunk_distill", "draft_align")
+
+
 class Stage(_Strict):
     name: str = Field(min_length=1)
-    kind: Literal["mtp_align", "trunk_distill"]
+    kind: Literal["mtp_align", "trunk_distill", "draft_align"]
     mtp_align: MtpAlign | None = None
     trunk_distill: TrunkDistill | None = None
+    draft_align: DraftAlign | None = None
     hyper: Hyper
 
     @model_validator(mode="after")
     def _kind_payload(self) -> Stage:
-        if self.kind == "mtp_align" and self.mtp_align is None:
-            raise ValueError("kind mtp_align requires an mtp_align table")
-        if self.kind == "trunk_distill" and self.trunk_distill is None:
-            raise ValueError("kind trunk_distill requires a trunk_distill table")
+        for kind in KINDS:
+            if self.kind == kind and getattr(self, kind) is None:
+                raise ValueError(f"kind {kind} requires a {kind} table")
         return self
 
 

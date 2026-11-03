@@ -70,6 +70,7 @@ pub enum Device {
 pub enum StageKind {
     MtpAlign,
     TrunkDistill,
+    DraftAlign,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -82,7 +83,52 @@ pub struct Stage {
     pub mtp_align: Option<MtpAlign>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trunk_distill: Option<TrunkDistill>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_align: Option<DraftAlign>,
     pub hyper: Hyper,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum DraftKind {
+    Medusa,
+    Eagle,
+}
+
+/// Trains a Medusa or EAGLE drafter against a frozen target from
+/// precomputed trunk features (like `mtp_align`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(deny_unknown_fields)]
+pub struct DraftAlign {
+    pub kind: DraftKind,
+    /// Medusa: number of heads.
+    #[serde(default = "default_heads")]
+    pub heads: u32,
+    /// EAGLE: decoder layers.
+    #[serde(default = "default_blocks")]
+    pub blocks: u32,
+    /// Medusa: reuse the frozen LM head instead of one trainable copy per head.
+    #[serde(default)]
+    pub share_lm_head: bool,
+    /// EAGLE: the target's HF config, for the decoder layer's shape.
+    #[serde(default)]
+    pub reference_config: Option<String>,
+    pub frozen_tensors: String,
+    pub embedding_tensor: String,
+    pub lm_head_tensor: String,
+    pub features: String,
+    #[serde(default = "default_eval_fraction")]
+    pub eval_fraction: f64,
+}
+
+fn default_heads() -> u32 {
+    4
+}
+
+fn default_blocks() -> u32 {
+    1
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -223,6 +269,32 @@ impl JobSpec {
                         "stage {}: eval_fraction must be in [0, 0.5]",
                         s.name
                     ))
+                }
+                _ => {}
+            }
+            match (s.kind, &s.draft_align) {
+                (StageKind::DraftAlign, None) => {
+                    return bad(format!(
+                        "stage {}: kind draft_align needs a draft_align table",
+                        s.name
+                    ))
+                }
+                (StageKind::DraftAlign, Some(d)) => {
+                    if d.heads == 0 || d.blocks == 0 {
+                        return bad(format!("stage {}: heads and blocks must be >= 1", s.name));
+                    }
+                    if d.kind == DraftKind::Eagle && d.reference_config.is_none() {
+                        return bad(format!(
+                            "stage {}: an EAGLE drafter needs reference_config",
+                            s.name
+                        ));
+                    }
+                    if !(0.0..=0.5).contains(&d.eval_fraction) {
+                        return bad(format!(
+                            "stage {}: eval_fraction must be in [0, 0.5]",
+                            s.name
+                        ));
+                    }
                 }
                 _ => {}
             }
@@ -507,6 +579,7 @@ pub fn mtp_align_spec(i: MtpAlignInputs) -> JobSpec {
                 eval_fraction: 0.05,
             }),
             trunk_distill: None,
+            draft_align: None,
             hyper: i.hyper,
         }],
     }
@@ -571,6 +644,42 @@ pub fn trunk_distill_spec(i: TrunkDistillInputs) -> JobSpec {
                 weight_fakequant: i.weight_fakequant,
                 eval_fraction: 0.05,
             }),
+            draft_align: None,
+            hyper: i.hyper,
+        }],
+    }
+}
+
+/// Inputs for a `draft_align` job.
+#[derive(Clone, Debug)]
+pub struct DraftAlignInputs {
+    pub job_id: String,
+    pub output_dir: PathBuf,
+    pub draft: DraftAlign,
+    pub hardware_profile: Option<String>,
+    pub device: Device,
+    pub hyper: Hyper,
+}
+
+pub fn draft_align_spec(i: DraftAlignInputs) -> JobSpec {
+    let name = match i.draft.kind {
+        DraftKind::Medusa => "medusa-align",
+        DraftKind::Eagle => "eagle-align",
+    };
+    JobSpec {
+        schema_version: SCHEMA_VERSION,
+        job_id: i.job_id,
+        created_by: Some(format!("modelbuilder {}", env!("CARGO_PKG_VERSION"))),
+        backend: Backend::Torch,
+        device: i.device,
+        hardware_profile: i.hardware_profile,
+        output_dir: i.output_dir.display().to_string(),
+        stages: vec![Stage {
+            name: name.into(),
+            kind: StageKind::DraftAlign,
+            mtp_align: None,
+            trunk_distill: None,
+            draft_align: Some(i.draft),
             hyper: i.hyper,
         }],
     }

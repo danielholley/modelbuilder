@@ -214,6 +214,11 @@ impl Feature for DraftHead {
             } else {
                 "Each head carries its own LM head (initialized from the target's).".into()
             },
+            match p.kind {
+                Kind::Medusa => format!("Train it: `modelbuilder job draft-align <target.gguf> --kind medusa --heads {} --features <dir> -o <run>` (draft_align stage; `--share-lm-head` for the cheaper variant).", p.size.unwrap_or(4)),
+                Kind::Eagle => format!("Train it: `modelbuilder job draft-align <target.gguf> --kind eagle --blocks {} --reference <hf-dir> --features <dir> -o <run>` (draft_align stage).", p.size.unwrap_or(1)),
+                Kind::Dspark => "No training stage yet: the paper describes the drafter but there is no public reference code to follow.".into(),
+            },
         ])
     }
 

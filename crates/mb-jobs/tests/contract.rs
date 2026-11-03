@@ -13,7 +13,11 @@ fn schema_dir() -> PathBuf {
 
 #[test]
 fn example_specs_round_trip() {
-    for name in ["mtp-align.job.json", "trunk-distill.job.json"] {
+    for name in [
+        "mtp-align.job.json",
+        "trunk-distill.job.json",
+        "draft-align.job.json",
+    ] {
         let text = std::fs::read_to_string(schema_dir().join("examples").join(name)).unwrap();
         let spec: JobSpec = serde_json::from_str(&text).unwrap();
         spec.validate().unwrap();
@@ -58,6 +62,21 @@ fn trunk_distill_builder_matches_the_example_shape() {
     assert!(bad.validate().is_err());
     let mut bad = spec;
     bad.stages[0].trunk_distill = None;
+    assert!(bad.validate().is_err());
+}
+
+#[test]
+fn draft_align_needs_its_table_and_eagle_its_config() {
+    let text = std::fs::read_to_string(schema_dir().join("examples/draft-align.job.json")).unwrap();
+    let spec: JobSpec = serde_json::from_str(&text).unwrap();
+    let mut bad = spec.clone();
+    bad.stages[0].draft_align.as_mut().unwrap().reference_config = None;
+    assert!(bad.validate().is_err());
+    let mut medusa = bad.clone();
+    medusa.stages[0].draft_align.as_mut().unwrap().kind = mb_jobs::DraftKind::Medusa;
+    medusa.validate().unwrap();
+    let mut bad = spec;
+    bad.stages[0].draft_align = None;
     assert!(bad.validate().is_err());
 }
 

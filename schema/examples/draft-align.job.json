@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "job_id": "eagle-align-example",
+  "created_by": "modelbuilder 0.1.0",
+  "backend": "torch",
+  "device": "auto",
+  "hardware_profile": "1x24GB",
+  "output_dir": "runs/eagle-align-example",
+  "stages": [
+    {
+      "name": "eagle-align",
+      "kind": "draft_align",
+      "draft_align": {
+        "kind": "eagle",
+        "heads": 4,
+        "blocks": 1,
+        "share_lm_head": false,
+        "reference_config": "models/base-model/config.json",
+        "frozen_tensors": "runs/eagle-align-example/frozen.safetensors",
+        "embedding_tensor": "token_embd.weight",
+        "lm_head_tensor": "output.weight",
+        "features": "runs/features/target",
+        "eval_fraction": 0.05
+      },
+      "hyper": {
+        "lr": 0.0001,
+        "steps": 2000,
+        "seq_len": 1024,
+        "batch_seqs": 4,
+        "warmup_steps": 100,
+        "weight_decay": 0.0,
+        "grad_clip": 1.0,
+        "log_every": 10,
+        "eval_every": 200,
+        "seed": 0,
+        "dtype": "bfloat16"
+      }
+    }
+  ]
+}

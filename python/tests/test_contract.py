@@ -16,6 +16,7 @@ SPEC_SCHEMA = json.loads((SCHEMA / "job-spec.v1.schema.json").read_text())
 EVENT_SCHEMA = json.loads((SCHEMA / "events.v1.schema.json").read_text())
 EXAMPLE = json.loads((SCHEMA / "examples" / "mtp-align.job.json").read_text())
 DISTILL = json.loads((SCHEMA / "examples" / "trunk-distill.job.json").read_text())
+DRAFT = json.loads((SCHEMA / "examples" / "draft-align.job.json").read_text())
 
 
 def both_accept(doc: dict) -> None:
@@ -33,6 +34,27 @@ def both_reject(doc: dict) -> None:
 def test_example_spec_is_valid():
     both_accept(EXAMPLE)
     both_accept(DISTILL)
+    both_accept(DRAFT)
+    medusa = copy.deepcopy(DRAFT)
+    d = medusa["stages"][0]["draft_align"]
+    d.update(kind="medusa", reference_config=None, share_lm_head=True)
+    both_accept(medusa)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda d: d["draft_align"].update(reference_config=None),  # EAGLE needs the layer shape
+        lambda d: d["draft_align"].update(kind="hydra"),
+        lambda d: d["draft_align"].update(heads=0),
+        lambda d: d.pop("draft_align"),
+        lambda d: d["draft_align"].update(extra=1),
+    ],
+)
+def test_bad_draft_align_is_rejected_by_both(mutate):
+    doc = copy.deepcopy(DRAFT)
+    mutate(doc["stages"][0])
+    both_reject(doc)
 
 
 @pytest.mark.parametrize(
