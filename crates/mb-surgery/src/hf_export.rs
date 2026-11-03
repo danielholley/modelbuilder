@@ -202,9 +202,9 @@ fn prune_config(cfg: &mut Value, a: usize, b: usize) {
     o.insert("num_hidden_layers".into(), json!(n as usize - (b - a)));
 }
 
-/// `(expert_count, expert_used_count, expert FFN width)` when the GGUF has
-/// routed experts.
-fn experts(ir: &ModelIr) -> Option<(u64, u64, u64)> {
+/// `(expert_count, expert_used_count, expert FFN width, shared-expert FFN
+/// width)` when the GGUF has routed experts.
+fn experts(ir: &ModelIr) -> Option<(u64, u64, u64, Option<u64>)> {
     let mb_ir::Metadata::Gguf { kv, .. } = &ir.raw.metadata else {
         return None;
     };
@@ -216,7 +216,12 @@ fn experts(ir: &ModelIr) -> Option<(u64, u64, u64)> {
     };
     let n = get("expert_count").filter(|&n| n > 0)?;
     let ff = get("expert_feed_forward_length").or_else(|| get("feed_forward_length"))?;
-    Some((n, get("expert_used_count")?, ff))
+    Some((
+        n,
+        get("expert_used_count")?,
+        ff,
+        get("expert_shared_feed_forward_length"),
+    ))
 }
 
 /// YaRN scaling set in the GGUF (e.g. by `surgery yarn`): `(factor,
@@ -500,10 +505,10 @@ fn write_all(
             }),
         );
         // Routed experts (e.g. after `surgery upcycle`): the adapter's MoE class.
-        if let (Some(moe), Some((experts, top_k, ff))) = (adapter.moe, experts(ir)) {
+        if let (Some(moe), Some((experts, top_k, ff, shared))) = (adapter.moe, experts(ir)) {
             o.insert("architectures".into(), json!([moe.hf_architecture]));
             o.insert("model_type".into(), json!(moe.hf_model_type));
-            for (k, v) in moe.config(experts, top_k, ff) {
+            for (k, v) in moe.config(experts, top_k, ff, shared) {
                 o.insert(k.into(), v);
             }
         }

@@ -175,15 +175,39 @@ fn qwen3_becomes_qwen3moe() {
 }
 
 #[test]
-fn hybrid_is_refused_with_a_reason() {
+fn hybrid_gets_routed_and_shared_experts() {
     let dir = tempfile::tempdir().unwrap();
     let (m, ir) = open(&mb_fixtures::gguf_hybrid_ternary(dir.path()));
-    let e = upcycle(
-        &m,
-        &ir,
-        &UpcycleOptions::default(),
-        &dir.path().join("x.gguf"),
-    )
-    .unwrap_err();
-    assert!(e.to_string().contains("qwen35moe"), "{e}");
+    let out = dir.path().join("moe.gguf");
+    upcycle(&m, &ir, &UpcycleOptions::default(), &out).unwrap();
+    let (u, uir) = open(&out);
+    assert_eq!(
+        meta(&uir, "general.architecture").unwrap().as_str(),
+        Some("qwen35moe")
+    );
+    assert!(meta(&uir, "qwen35moe.expert_shared_feed_forward_length").is_some());
+    let gate = m.tensor("blk.0.ffn_gate.weight").unwrap();
+    let sh = u.tensor("blk.0.ffn_gate_shexp.weight").unwrap();
+    assert_eq!(m.tensor_bytes(gate).unwrap(), u.tensor_bytes(sh).unwrap());
+    // The shared down projection decodes to zeros, and the shared gate is zero.
+    let down = u.tensor("blk.0.ffn_down_shexp.weight").unwrap();
+    let mut v = Vec::new();
+    mb_formats::dequant::dequantize(down.dtype, u.tensor_bytes(down).unwrap(), &mut v).unwrap();
+    assert!(v.iter().all(|&x| x == 0.0));
+    assert_eq!(
+        u.tensor("blk.0.ffn_gate_inp_shexp.weight").unwrap().shape,
+        vec![128]
+    );
+    // Rotated dense weights are listed as rotated experts and shared experts.
+    if let Some(names) = meta(&uir, "prism.hadamard.weight_names") {
+        let names: Vec<&str> = names
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x.as_str())
+            .collect();
+        assert!(names.iter().all(|n| u.tensor(n).is_some()), "{names:?}");
+        assert!(!names.iter().any(|n| n.ends_with("ffn_gate.weight")));
+        assert!(names.iter().any(|n| n.ends_with("ffn_gate_shexp.weight")));
+    }
 }

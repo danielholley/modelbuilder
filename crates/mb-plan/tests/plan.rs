@@ -325,7 +325,7 @@ fn pipeline_chains_models_in_schedule_order() {
     assert_eq!(staged, scheduled);
 
     // A step with no runner is listed, and the plan says so.
-    let p = plan(&ctx, &[parse_feature_spec("moe-upcycle")], &hw).unwrap();
+    let p = plan(&ctx, &[parse_feature_spec("draft-head:kind=dspark")], &hw).unwrap();
     assert!(p.pipeline.steps.iter().any(|s| s.command.is_none()));
     assert!(p.pipeline.notes.iter().any(|n| n.contains("No runner")));
 }

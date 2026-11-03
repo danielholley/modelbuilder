@@ -178,7 +178,7 @@ impl Feature for MoeUpcycle {
             format!("In layers {layers:?}: ffn_{{gate,up,down}} → ffn_{{gate,up,down}}_exps with {} copies stacked along a new leading axis. Quantized blocks are copied, not re-encoded, so the copies are exact.", p.experts),
             format!("Add ffn_gate_inp [{}, hidden] (router, F32), initialized small and random.", p.experts),
             format!("Metadata: expert_count = {}, expert_used_count = {}.", p.experts, p.top_k),
-            "Run it: `modelbuilder surgery upcycle <model.gguf> --experts N --top-k K -o out.gguf` (llama → Mixtral layout, qwen3 → qwen3moe; every layer).".into(),
+            "Run it: `modelbuilder surgery upcycle <model.gguf> --experts N --top-k K -o out.gguf` (llama → Mixtral layout, qwen3 → qwen3moe, qwen35 → qwen35moe with a shared expert; every layer).".into(),
         ])
     }
 
@@ -190,11 +190,11 @@ impl Feature for MoeUpcycle {
         let p: P = parse_params(ID, params)?;
         // The architectures `surgery upcycle` maps (mb_surgery::upcycle::MOE_ARCHS).
         let family = ctx.ir.family.as_deref().unwrap_or("");
-        if !matches!(family, "llama" | "qwen3") {
+        if !matches!(family, "llama" | "qwen3" | "qwen35") {
             return Ok(vec![crate::RunStep::missing(
                 TrunkUse::Restructure,
                 "upcycle",
-                &format!("`surgery upcycle` maps llama and qwen3 GGUFs only; `{family}` has no verified MoE layout yet."),
+                &format!("`surgery upcycle` maps llama, qwen3 and qwen35 GGUFs; `{family}` has no verified MoE layout yet."),
             )]);
         }
         Ok(vec![

@@ -30,6 +30,11 @@ pub struct MoeArch {
     pub moe: &'static str,
     /// The loader reads `{arch}.expert_feed_forward_length`.
     pub expert_ff_key: bool,
+    /// The MoE block also has a gated shared expert (`ffn_*_shexp`,
+    /// `ffn_gate_inp_shexp`). It is written with the dense MLP's gate and up
+    /// projections and a zero down projection, so it adds exactly zero until
+    /// trained but still receives gradients.
+    pub shared_expert: bool,
 }
 
 /// Dense → MoE architectures whose llama.cpp loaders expect exactly the
@@ -41,11 +46,22 @@ pub const MOE_ARCHS: &[MoeArch] = &[
         dense: "llama",
         moe: "llama",
         expert_ff_key: false,
+        shared_expert: false,
     },
     MoeArch {
         dense: "qwen3",
         moe: "qwen3moe",
         expert_ff_key: true,
+        shared_expert: false,
+    },
+    // Qwen3.5 hybrids (gated DeltaNet + gated attention): routed experts plus
+    // a sigmoid-gated shared expert; transformers' Qwen3.5-MoE renormalizes
+    // the top-k weights.
+    MoeArch {
+        dense: "qwen35",
+        moe: "qwen35moe",
+        expert_ff_key: true,
+        shared_expert: true,
     },
 ];
 
@@ -99,6 +115,16 @@ const DENSE: [(&str, &str); 3] = [
     ("ffn_down.weight", "ffn_down_exps.weight"),
 ];
 
+/// `blk.{i}.ffn_gate.weight` → `blk.{i}.ffn_gate_shexp.weight`.
+fn shared_name(name: &str) -> Option<String> {
+    let (i, rest) = layer_of(name)?;
+    let kind = DENSE.iter().find(|(d, _)| *d == rest)?.0;
+    Some(format!(
+        "blk.{i}.{}",
+        kind.replace(".weight", "_shexp.weight")
+    ))
+}
+
 fn expert_name(name: &str) -> Option<String> {
     let (i, rest) = layer_of(name)?;
     DENSE
@@ -119,9 +145,7 @@ pub fn upcycle(
     let a = MOE_ARCHS.iter().find(|a| a.dense == arch).ok_or_else(|| {
         let known: Vec<&str> = MOE_ARCHS.iter().map(|a| a.dense).collect();
         SurgeryError::Unsupported(format!(
-            "no dense → MoE mapping for `{arch}` (have: {}). Hybrid architectures such as qwen35 \
-             have a MoE counterpart (qwen35moe) whose loader expects a shared expert; that \
-             layout isn't verified here yet",
+            "no dense → MoE mapping for `{arch}` (have: {})",
             known.join(", ")
         ))
     })?;
@@ -203,17 +227,32 @@ pub fn upcycle(
             MetaValue::U32(ff),
         );
         changed.push(format!("{p}.expert_feed_forward_length = {ff}"));
+        if a.shared_expert {
+            set(
+                &mut kv,
+                &format!("{p}.expert_shared_feed_forward_length"),
+                MetaValue::U32(ff),
+            );
+            changed.push(format!("{p}.expert_shared_feed_forward_length = {ff}"));
+        }
     }
     // Rotated (or otherwise listed) dense tensors are now expert tensors.
     for (k, v) in kv.iter_mut() {
         if let MetaValue::Array { values, .. } = v {
             let mut renamed = false;
+            let mut shared = Vec::new();
             for x in values.iter_mut() {
-                if let Some(e) = x.as_str().and_then(expert_name) {
-                    *x = MetaValue::String(e);
-                    renamed = true;
+                if let Some(s) = x.as_str() {
+                    if let (Some(e), Some(sh)) = (expert_name(s), shared_name(s)) {
+                        if a.shared_expert {
+                            shared.push(MetaValue::String(sh));
+                        }
+                        *x = MetaValue::String(e);
+                        renamed = true;
+                    }
                 }
             }
+            values.extend(shared);
             if renamed {
                 changed.push(format!("{k}: dense MLP names → expert names"));
             }
@@ -238,6 +277,30 @@ pub fn upcycle(
         })
         .collect();
 
+    // Zero rows for the shared expert's down projection, in the stored type
+    // (F16 when there is no encoder for it); every row encodes the same way.
+    let mut zero_rows: Vec<(DType, Vec<u8>)> = Vec::new();
+    if a.shared_expert {
+        for t in &ir.raw.tensors {
+            let trunk_layer = layer_of(&t.name).is_some_and(|(i, _)| i < n_layers);
+            if trunk_layer && t.name.ends_with("ffn_down.weight") {
+                let width = *t.shape.last().unwrap_or(&1) as usize;
+                let mut row = Vec::new();
+                let dtype = match mb_formats::quant::quantize(t.dtype, &vec![0.0; width], &mut row)
+                {
+                    Ok(()) => t.dtype,
+                    Err(_) => {
+                        row = vec![0u8; width * 2];
+                        DType::F16
+                    }
+                };
+                zero_rows.push((dtype, row));
+            }
+        }
+    }
+    let zero_gate = vec![0u8; hidden as usize * 4];
+    let mut downs = zero_rows.iter();
+
     let e = opts.experts as usize;
     let mut tensors = Vec::new();
     let mut written = Vec::new();
@@ -261,6 +324,33 @@ pub fn upcycle(
                     shape,
                     parts: vec![bytes; e],
                 });
+                if a.shared_expert {
+                    let name = shared_name(&t.name).expect("a dense MLP tensor");
+                    let (dtype, parts, transform) = if t.name.ends_with("ffn_down.weight") {
+                        let (dtype, row) = downs.next().expect("one zero row per down projection");
+                        let rows = t.shape[0] as usize;
+                        (
+                            *dtype,
+                            vec![&row[..]; rows],
+                            "zeros: adds nothing until trained".to_string(),
+                        )
+                    } else {
+                        (t.dtype, vec![bytes], "copy of the stored bytes".to_string())
+                    };
+                    written.push(WrittenTensor {
+                        name: name.clone(),
+                        dtype: dtype.to_string(),
+                        shape: t.shape.clone(),
+                        source: format!("target:{}", t.name),
+                        transform,
+                    });
+                    tensors.push(gguf::TensorParts {
+                        name,
+                        dtype,
+                        shape: t.shape.clone(),
+                        parts,
+                    });
+                }
                 // The router goes right after the layer's last MLP tensor.
                 if t.name.ends_with("ffn_down.weight") {
                     let (l, _) = layer_of(&t.name).expect("layer tensor");
@@ -278,6 +368,22 @@ pub fn upcycle(
                         shape: vec![u64::from(opts.experts), hidden],
                         parts: vec![&routers[l as usize]],
                     });
+                    if a.shared_expert {
+                        let name = format!("blk.{l}.ffn_gate_inp_shexp.weight");
+                        written.push(WrittenTensor {
+                            name: name.clone(),
+                            dtype: "F32".into(),
+                            shape: vec![hidden],
+                            source: "new".into(),
+                            transform: "shared-expert gate, zeros".into(),
+                        });
+                        tensors.push(gguf::TensorParts {
+                            name,
+                            dtype: DType::F32,
+                            shape: vec![hidden],
+                            parts: vec![&zero_gate],
+                        });
+                    }
                 }
             }
             None => tensors.push(gguf::TensorParts {
@@ -300,8 +406,8 @@ pub fn upcycle(
         ),
         "Continue pretraining to make the experts diverge (the router and the training data break the symmetry).".into(),
     ];
-    if a.expert_ff_key {
-        notes.push("Exporting to Hugging Face: set norm_topk_prob = true in the MoE config, or the HF model won't match.".into());
+    if a.shared_expert {
+        notes.push("The shared expert starts with the dense gate/up projections and a zero down projection, so it adds nothing until trained.".into());
     }
     Ok(SurgeryReport {
         output: out.to_owned(),

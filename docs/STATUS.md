@@ -43,9 +43,12 @@ speculative decoding and **DeepSeek-V4.1-Flash-style KV cache changes**.
   dense one exactly, and `trunk_distill` trains its experts and routers
   (transformers' fused expert parameters are mapped back to checkpoint
   names and fake-quantized in the source format) and `surgery replace`
-  re-encodes every expert into the stacked GGUF tensors. `qwen35` is
-  refused: its MoE counterpart expects a shared expert, a layout not
-  verified yet.
+  re-encodes every expert into the stacked GGUF tensors. `qwen35` hybrids
+  become `qwen35moe` with routed experts plus a sigmoid-gated shared expert
+  (the dense gate/up projections, a zero down projection, a zero gate), so
+  the shared expert adds nothing until trained but still gets gradients; in
+  transformers' Qwen3.5-MoE the upcycled ternary, rotated hybrid fixture
+  matches the dense model to 1e-10.
 - **`surgery mla`** (MHA2MLA, arXiv 2502.14837): partial RoPE per KV head
   (data-free `high` or `uniform` frequency choice) and a joint SVD of the
   RoPE-free K rows and V into a latent (`kv_a`, `kv_b`, `k_rope`), written to
@@ -169,8 +172,9 @@ These need hardware, data or runtime code that isn't in this repository:
     for runtimes that load them (e.g. vLLM).
 - **A llama.cpp check of `surgery upcycle`**: transformers' MoE classes give
   the dense model's logits exactly, but no llama.cpp run has yet (building
-  llama.cpp wasn't possible in the session that wrote it). `qwen35` →
-  `qwen35moe` needs the shared-expert layout checked against the loader.
+  llama.cpp wasn't possible in the session that wrote it). The `qwen35moe`
+  key and tensor names follow llama.cpp's qwen2moe/qwen3next conventions
+  and need that run to confirm.
 - **DSpark drafters**: the paper describes the drafter but there is no
   public reference code to follow.
 - **Backends**: `mlx` runs `mtp_align` only (other stages use torch on MPS).
@@ -183,8 +187,8 @@ These need hardware, data or runtime code that isn't in this repository:
 
 1. Run the real-model checks above on the cluster (item 6 and 8 of the
    revised order below).
-2. Run an upcycled fixture in llama.cpp (logits equal to the dense model's),
-   then check the `qwen35moe` loader.
+2. Run upcycled fixtures in llama.cpp (logits equal to the dense model's),
+   including the `qwen35moe` loader.
 3. Run `trunk_distill --device-map auto` and `--shard fsdp` on real GPUs.
 
 ## Target hardware (the user's cluster)

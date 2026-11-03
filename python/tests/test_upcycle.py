@@ -20,22 +20,31 @@ def _logits(hf: Path) -> tuple[str, torch.Tensor]:
 
 
 @pytest.mark.parametrize(
-    ("fixture", "cls"), [("gguf-llama", "MixtralForCausalLM"), ("gguf-qwen3", "Qwen3MoeForCausalLM")]
+    ("fixture", "cls"),
+    [
+        ("gguf-llama", "MixtralForCausalLM"),
+        ("gguf-qwen3", "Qwen3MoeForCausalLM"),
+        ("gguf-hybrid-ternary", "Qwen3_5MoeForCausalLM"),  # ternary, rotated, with a shared expert
+    ],
 )
 def test_upcycled_model_computes_the_dense_function(tmp_path: Path, fixture: str, cls: str) -> None:
     pytest.importorskip("transformers")
     dense = Path(mb("fixture", fixture, str(tmp_path / "d")).strip())
+    ref = dense.parent
+    if fixture == "gguf-hybrid-ternary":
+        ref = tmp_path / "ref"
+        mb("fixture", "hybrid-mtp-reference", str(ref))
     moe = tmp_path / "moe.gguf"
     mb("surgery", "upcycle", str(dense), "--experts", "4", "--top-k", "2", "--router-std", "0.5", "-o", str(moe))
     for src, out in [(dense, "dense-hf"), (moe, "moe-hf")]:
-        mb("export-hf", str(src), "--reference", str(dense.parent), "--dtype", "f32", "-o", str(tmp_path / out))
+        mb("export-hf", str(src), "--reference", str(ref), "--dtype", "f32", "-o", str(tmp_path / out))
     cfg = json.loads((tmp_path / "moe-hf" / "config.json").read_text())
     assert cfg["num_experts_per_tok"] == 2
     name_d, d = _logits(tmp_path / "dense-hf")
     name_m, m = _logits(tmp_path / "moe-hf")
     assert name_m == cls and name_d != cls
     # Identical experts and renormalized top-k weights: the router can't change the output.
-    assert torch.allclose(d, m, atol=1e-5), (d - m).abs().max()
+    assert torch.allclose(d, m, atol=1e-6 * max(1.0, float(d.abs().max()))), (d - m).abs().max()
 
 
 def test_continued_training_of_the_experts_writes_back(tmp_path: Path) -> None:

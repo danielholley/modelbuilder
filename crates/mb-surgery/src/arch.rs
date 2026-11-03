@@ -55,6 +55,9 @@ pub enum MoeStyle {
     /// Qwen3-MoE: `mlp.experts.{e}.{gate,up,down}_proj`, `num_experts`,
     /// renormalized when `norm_topk_prob` is set.
     Qwen,
+    /// Qwen3.5-MoE hybrids: Qwen names plus a sigmoid-gated shared expert
+    /// (`mlp.shared_expert.*`, `mlp.shared_expert_gate`); always renormalized.
+    QwenHybrid,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -68,7 +71,7 @@ impl MoeHf {
     fn block(&self) -> &'static str {
         match self.style {
             MoeStyle::Mixtral => "block_sparse_moe",
-            MoeStyle::Qwen => "mlp",
+            MoeStyle::Qwen | MoeStyle::QwenHybrid => "mlp",
         }
     }
 
@@ -78,15 +81,30 @@ impl MoeHf {
             (MoeStyle::Mixtral, "gate") => "w1",
             (MoeStyle::Mixtral, "up") => "w3",
             (MoeStyle::Mixtral, _) => "w2",
-            (MoeStyle::Qwen, "gate") => "gate_proj",
-            (MoeStyle::Qwen, "up") => "up_proj",
-            (MoeStyle::Qwen, _) => "down_proj",
+            (_, "gate") => "gate_proj",
+            (_, "up") => "up_proj",
+            (_, _) => "down_proj",
         }
     }
 
     /// Routing keys for the HF config.
-    pub fn config(&self, experts: u64, top_k: u64, expert_ff: u64) -> Vec<(&'static str, Value)> {
+    pub fn config(
+        &self,
+        experts: u64,
+        top_k: u64,
+        expert_ff: u64,
+        shared_ff: Option<u64>,
+    ) -> Vec<(&'static str, Value)> {
         match self.style {
+            MoeStyle::QwenHybrid => vec![
+                ("num_experts", experts.into()),
+                ("num_experts_per_tok", top_k.into()),
+                ("moe_intermediate_size", expert_ff.into()),
+                (
+                    "shared_expert_intermediate_size",
+                    shared_ff.unwrap_or(expert_ff).into(),
+                ),
+            ],
             MoeStyle::Mixtral => vec![
                 ("num_local_experts", experts.into()),
                 ("num_experts_per_tok", top_k.into()),
@@ -153,6 +171,21 @@ pub const ADAPTERS: &[Adapter] = &[
         gated_deltanet: true,
         nextn: true,
         moe: None,
+    },
+    Adapter {
+        gguf_archs: &["qwen35moe"],
+        hf_architecture: "Qwen3_5MoeForCausalLM",
+        hf_model_type: "qwen3_5_moe_text",
+        norm_offset: true,
+        rope_permute: false,
+        post_attn_norm: "post_attention_norm",
+        gated_deltanet: true,
+        nextn: true,
+        moe: Some(MoeHf {
+            hf_architecture: "Qwen3_5MoeForCausalLM",
+            hf_model_type: "qwen3_5_moe_text",
+            style: MoeStyle::QwenHybrid,
+        }),
     },
     Adapter {
         gguf_archs: &["qwen3moe"],
@@ -477,6 +510,10 @@ pub fn to_hf_all(
             "ffn_up_exps.weight" => "up",
             "ffn_down_exps.weight" => "down",
             "ffn_gate_inp.weight" => "router",
+            "ffn_gate_shexp.weight" => "shared_gate",
+            "ffn_up_shexp.weight" => "shared_up",
+            "ffn_down_shexp.weight" => "shared_down",
+            "ffn_gate_inp_shexp.weight" => "shared_router",
             _ => return None,
         };
         Some((idx.parse::<u32>().ok()?, which))
@@ -497,12 +534,30 @@ pub fn to_hf_all(
         elem: Elem::Copy,
         note: "",
     };
-    if which == "router" {
-        return Ok(vec![mapping(
-            format!("{base}.gate.weight"),
-            shape.to_vec(),
-            None,
-        )]);
+    match which {
+        "router" => {
+            return Ok(vec![mapping(
+                format!("{base}.gate.weight"),
+                shape.to_vec(),
+                None,
+            )])
+        }
+        "shared_router" => {
+            // GGUF [hidden] → HF Linear(hidden, 1).weight [1, hidden].
+            return Ok(vec![mapping(
+                format!("{base}.shared_expert_gate.weight"),
+                [&[1], shape].concat(),
+                None,
+            )]);
+        }
+        s if s.starts_with("shared_") => {
+            return Ok(vec![mapping(
+                format!("{base}.shared_expert.{}.weight", moe.proj(&s[7..])),
+                shape.to_vec(),
+                None,
+            )]);
+        }
+        _ => {}
     }
     let [e, r, c] = shape[..] else {
         return Err(SurgeryError::Incompatible(format!(

@@ -182,7 +182,7 @@ enum SurgeryOp {
     },
     /// Dense → MoE sparse upcycling: every layer's MLP becomes `--experts`
     /// copies (stored bytes repeated, never re-encoded) plus a random router.
-    /// Supports llama (Mixtral layout) and qwen3 (→ qwen3moe).
+    /// Supports llama (Mixtral layout), qwen3 (→ qwen3moe) and qwen35 (→ qwen35moe).
     Upcycle {
         target: PathBuf,
         #[arg(long, default_value_t = 8)]
