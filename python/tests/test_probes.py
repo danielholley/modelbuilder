@@ -97,3 +97,46 @@ def test_hf_vs_gguf_matches_a_model_against_itself(tmp_path: Path):
     r = probes.hf_vs_gguf(Fake(), tmp_path / "hf", ["hello world", "x"], device="cpu")
     assert r.tokens == 11 and r.top1_agreement == 1.0
     assert r.cosine_min > 0.99999 and r.rel_rms < 1e-5
+
+
+def test_skill_grading():
+    assert probes.grade("exact", "10", "The output is `10`.")
+    assert not probes.grade("exact", "10", "100")
+    assert probes.grade("exact", "2-4-6", "2-4-6")
+    assert probes.grade("any", ["buenos días", "buenos dias"], "Buenos días")
+    call = {"name": "get_weather", "arguments": {"city": "Paris"}}
+    assert probes.grade("call", call, 'Sure: {"name": "get_weather", "arguments": {"city": "paris"}}')
+    assert not probes.grade("call", call, '{"name": "search", "arguments": {"query": "Paris"}}')
+    assert not probes.grade("call", call, "It is sunny in Paris.")
+
+
+class Student(Oracle):
+    """Gets code and tool calls right, reasoning and languages wrong."""
+
+    def do_POST(self) -> None:
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.path == "/apply-template":
+            self._send({"prompt": body["messages"][0]["content"]})
+            return
+        p = body["prompt"]
+        answers = {"sum(range(5))": "10", "hello big world": "3", "'ab' * 3": "ababab", "f(5)": "120",
+                   "x[-1]": "3", "join('-')": "2-4-6"}  # fmt: skip
+        content = next((a for k, a in answers.items() if k in p), "no idea")
+        p = p.rsplit("\n\n", 1)[-1]  # the question, after the tool list
+        if "weather" in p:
+            content = '{"name": "get_weather", "arguments": {"city": "Paris"}}'
+        elif "euros" in p:
+            content = '{"name": "convert_currency", "arguments": {"amount": 100, "source": "USD", "target": "EUR"}}'
+        elif "World Cup" in p:
+            content = '{"name": "search", "arguments": {"query": "2018 World Cup winner"}}'
+        self._send({"content": content})
+
+
+def test_skills_reports_per_category():
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Student)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        r = probes.skills(Server(f"http://127.0.0.1:{httpd.server_address[1]}"))
+    finally:
+        httpd.shutdown()
+    assert r.by_category == {"code": 1.0, "reasoning": 0.0, "tool_use": 1.0, "languages": 0.0}

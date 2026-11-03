@@ -10,6 +10,9 @@
   quantized KV cache needs QAT at all.
 - :func:`perplexity_hf`: the same perplexity for an HF checkpoint in PyTorch
   (e.g. before re-encoding a QAT result), with a strided sliding window.
+- :func:`skills`: a short auto-graded suite of code, reasoning, tool-use and
+  language items through ``llama-server``, per category; a smoke test of what
+  a model can do and what a change breaks, not a benchmark.
 
 Every result records its settings, so reports can be compared later.
 """
@@ -289,3 +292,127 @@ def hf_vs_gguf(server, hf_dir: Path, texts: list[str], max_tokens: int = 512, de
         raise ValueError("no text with at least 2 tokens")
     cos = torch.cat(cos_all)
     return HiddenMatch(n, float(cos.mean()), float(cos.min()), (err / max(norm, 1e-30)) ** 0.5, agree / n)
+
+
+# ---------------------------------------------------------------------------
+# Skills: a short, auto-graded suite per category (code, reasoning, tool use,
+# languages). A smoke test of what a model can do and of what a change breaks,
+# not a benchmark: compare the same suite before and after.
+
+TOOLS_PROMPT = (
+    "You can call these tools. To call one, reply with only a JSON object "
+    '{"name": <tool name>, "arguments": {<argument>: <value>}} and nothing else.\n'
+    "- get_weather(city: string): current weather in a city\n"
+    "- convert_currency(amount: number, source: string, target: string): convert money, ISO codes\n"
+    "- search(query: string): web search"
+)
+
+_PY = "What does this Python print? Answer with the output only.\n\n"
+_JS = "What does this JavaScript log? Answer with the output only.\n\n"
+_NUM = " Answer with the number only."
+_TR = "Answer with the translation only."
+
+#: (category, prompt, grader, expected). Graders: ``exact`` (the answer appears
+#: as a whole token), ``any`` (any of the answers appears), ``call`` (a JSON tool
+#: call with this name and at least these arguments).
+SKILLS: list[tuple[str, str, str, object]] = [
+    ("code", _PY + "print(sum(range(5)))", "exact", "10"),
+    ("code", _PY + "print(len('hello big world'.split()))", "exact", "3"),
+    ("code", _PY + "print('ab' * 3)", "exact", "ababab"),
+    ("code", _PY + "def f(n):\n    return 1 if n < 2 else n * f(n - 1)\nprint(f(5))", "exact", "120"),
+    ("code", _PY + "x = [3, 1, 2]\nx.sort()\nprint(x[-1])", "exact", "3"),
+    ("code", _JS + "console.log([1, 2, 3].map(x => x * 2).join('-'))", "exact", "2-4-6"),
+    ("reasoning", "What is 17 * 23?" + _NUM, "exact", "391"),
+    ("reasoning", "How many days are in a leap year?" + _NUM, "exact", "366"),
+    ("reasoning", "What comes next: 2, 4, 8, 16, ?" + _NUM, "exact", "32"),
+    ("reasoning", "A shop sells pens at 3 for $2. How many dollars do 12 pens cost?" + _NUM, "exact", "8"),
+    ("reasoning", "Tom is taller than Ann. Ann is taller than Bo. Who is the shortest? Answer with the name only.", "exact", "Bo"),  # noqa: E501
+    ("tool_use", TOOLS_PROMPT + "\n\nWhat's the weather like in Paris right now?", "call", {"name": "get_weather", "arguments": {"city": "Paris"}}),  # noqa: E501
+    ("tool_use", TOOLS_PROMPT + "\n\nHow much is 100 US dollars in euros?", "call", {"name": "convert_currency", "arguments": {"source": "USD", "target": "EUR"}}),  # noqa: E501
+    ("tool_use", TOOLS_PROMPT + "\n\nLook up who won the 2018 football World Cup.", "call", {"name": "search", "arguments": {}}),  # noqa: E501
+    ("languages", "Translate into French: 'thank you'. " + _TR, "any", ["merci"]),
+    ("languages", "Translate into Spanish: 'good morning'. " + _TR, "any", ["buenos días", "buenos dias"]),
+    ("languages", "Translate into German: 'the cat'. " + _TR, "any", ["die katze"]),
+    ("languages", "Translate into Italian: 'water'. " + _TR, "any", ["acqua"]),
+    ("languages", "Translate into Japanese: 'water'. " + _TR, "any", ["水", "みず"]),
+    ("languages", "Translate into Chinese: 'hello'. " + _TR, "any", ["你好", "您好"]),
+]  # fmt: skip
+
+
+def _first_json(text: str) -> dict | None:
+    import json
+
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        for i in range(start, len(text)):
+            depth += {"{": 1, "}": -1}.get(text[i], 0)
+            if depth == 0:
+                try:
+                    obj = json.loads(text[start : i + 1])
+                    return obj if isinstance(obj, dict) else None
+                except ValueError:
+                    break
+        start = text.find("{", start + 1)
+    return None
+
+
+def grade(grader: str, expected, answer: str) -> bool:
+    a = answer.strip().strip("`").strip()
+    low = a.lower()
+    if grader == "exact":
+        return re.search(rf"(?<![\w-]){re.escape(str(expected).lower())}(?![\w-])", low) is not None
+    if grader == "any":
+        return any(str(x).lower() in low for x in expected)
+    if grader == "call":
+        call = _first_json(a)
+        if not call or call.get("name") != expected["name"]:
+            return False
+        args = call.get("arguments") or call.get("parameters") or {}
+        return all(str(args.get(k, "")).strip().lower() == str(v).lower() for k, v in expected["arguments"].items())
+    raise ValueError(f"unknown grader {grader}")
+
+
+@dataclass
+class SkillTrial:
+    category: str
+    passed: bool
+    answer: str
+
+
+@dataclass
+class SkillsResult:
+    model: str
+    trials: list[SkillTrial] = field(default_factory=list)
+
+    @property
+    def by_category(self) -> dict[str, float]:
+        cats: dict[str, list[bool]] = {}
+        for t in self.trials:
+            cats.setdefault(t.category, []).append(t.passed)
+        return {c: sum(v) / len(v) for c, v in cats.items()}
+
+
+def load_items(path: Path) -> list[tuple[str, str, str, object]]:
+    """A custom suite: JSONL with ``category``, ``prompt``, ``grader`` and ``expected`` per line."""
+    import json
+
+    items = []
+    for line in Path(path).read_text().splitlines():
+        if line.strip():
+            x = json.loads(line)
+            items.append((x["category"], x["prompt"], x["grader"], x["expected"]))
+    return items
+
+
+def skills(server, items=None, *, model: str = "", seed: int = 0, n_predict: int = 96, progress=None) -> SkillsResult:
+    """Asks every item through the chat template at temperature 0 and grades the answer."""
+    res = SkillsResult(model)
+    for category, prompt, grader, expected in items or SKILLS:
+        text = server.apply_template([{"role": "user", "content": prompt}])
+        answer = server.complete(text, n_predict=n_predict, temperature=0.0, seed=seed)
+        trial = SkillTrial(category, grade(grader, expected, answer), answer.strip()[:120])
+        res.trials.append(trial)
+        if progress:
+            progress(trial)
+    return res

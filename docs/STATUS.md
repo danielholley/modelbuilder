@@ -74,6 +74,11 @@ speculative decoding and **DeepSeek-V4.1-Flash-style KV cache changes**.
   have runners.
 - **LoRA in the cost model**: a `with_lora` fit tier, priced per profile,
   before the packed-trunk tier.
+- **`probe skills`**: a short auto-graded suite (code output, reasoning,
+  JSON tool calls, translations) through `llama-server`, reported per
+  category, the probe layer's "what is it good at" check; `--items` takes a
+  custom suite. A smoke test to compare before and after a change, not a
+  benchmark.
 - **The `mlx` backend** (Apple Silicon): `mtp_align` with the head in MLX,
   matching the PyTorch head to 1e-4 and writing the same `mtp.*` output;
   `job mtp-align --backend mlx`. Tested in CI with `mlx[cpu]` on Linux.
@@ -114,7 +119,7 @@ python -m modelbuilder_train generate-corpus | extract-features | run | validate
 
 ### Test coverage
 
-104 Rust tests, 73 Python tests (including end-to-end runs through the Rust
+104 Rust tests, 75 Python tests (including end-to-end runs through the Rust
 binary on fixtures: MTP alignment, KV QAT, MLA recovery, healing a pruned
 model against its original, LoRA write-back, draft heads) and 7 web tests,
 all in CI. Every test uses tiny synthetic checkpoints; nothing downloads a

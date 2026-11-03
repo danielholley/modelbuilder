@@ -140,6 +140,26 @@ def cmd_probe(args: argparse.Namespace) -> int:
             f"{r.tokens} tokens: cosine mean {r.cosine_mean:.6f} (min {r.cosine_min:.6f}), "
             f"relative RMS {r.rel_rms:.2e}, top-1 agreement {100 * r.top1_agreement:.2f}%"
         )
+    elif args.probe == "skills":
+        from modelbuilder_train.server import Server
+
+        items = probes.load_items(Path(args.items)) if args.items else None
+
+        def run(s):
+            return probes.skills(s, items, model=args.model or args.server or "")
+
+        if args.server:
+            r = run(Server(args.server))
+        else:
+            with Server.launch(
+                Path(args.llama_bin), Path(args.model), port=args.port, parallel=1, ctx=args.ctx,
+                threads=args.threads, gpu_layers=args.gpu_layers,
+            ) as s:  # fmt: skip
+                r = run(s)
+        report = {"model": r.model, "by_category": r.by_category, "trials": [asdict(t) for t in r.trials]}
+        for c, acc in r.by_category.items():
+            n = sum(t.category == c for t in r.trials)
+            print(f"{c:<12}{100 * acc:5.0f}%  of {n}")
     else:  # kv-cache
         report = probes.kv_cache_sweep(
             Path(args.llama_bin), Path(args.model), types=args.types.split(","),
@@ -390,6 +410,11 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--texts", required=True, help="JSONL with a `text` per line")
     q.add_argument("--device", default="auto")
     q.add_argument("--port", type=int, default=8094)
+    probe_common(q)
+    q = psub.add_parser("skills", help="a short auto-graded suite: code, reasoning, tool use, languages")
+    q.add_argument("--items", help="a custom suite: JSONL with category, prompt, grader (exact|any|call), expected")
+    q.add_argument("--server", help="URL of a running llama-server (instead of --llama-bin and --model)")
+    q.add_argument("--port", type=int, default=8095)
     probe_common(q)
     q = psub.add_parser("kv-cache", help="perplexity and retrieval per KV cache type, vs f16")
     q.add_argument("--types", default="q8_0,q4_0", help="llama.cpp cache types, e.g. q8_0,q5_0,q4_0")
