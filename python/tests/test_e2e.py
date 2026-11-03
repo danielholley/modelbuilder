@@ -20,8 +20,11 @@ BIN = Path(os.environ.get("MODELBUILDER_BIN", ROOT / "target" / "debug" / "model
 pytestmark = pytest.mark.skipif(not BIN.exists(), reason=f"no modelbuilder binary at {BIN}")
 
 
-def mb(*args: str) -> str:
+def mb(*args: str, check: bool = True) -> str:
+    """Runs the binary; with ``check=False``, returns stdout and stderr of a run that may fail."""
     r = subprocess.run([str(BIN), *args], capture_output=True, text=True)
+    if not check:
+        return r.stdout + r.stderr
     assert r.returncode == 0, f"modelbuilder {' '.join(args)} failed:\n{r.stdout}\n{r.stderr}"
     return r.stdout
 

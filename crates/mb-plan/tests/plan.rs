@@ -67,6 +67,7 @@ fn new_catalog_features_on_hybrid_ternary() {
     let p = plan(&ctx, &[], &hw).unwrap();
 
     // MLA: 2 KV heads × 32 dims × 2 = 128 cached values; the default rank doesn't shrink that.
+    // kv_rank 48 + 2 heads × rope_dim 16 = 80 values per layer.
     let mla = find(&p, "mla");
     assert!(mla
         .compat
@@ -80,7 +81,7 @@ fn new_catalog_features_on_hybrid_ternary() {
     )
     .unwrap();
     let e = p2.features[0].estimate.as_ref().unwrap();
-    assert_eq!((e.effects[0].before, e.effects[0].after), (512.0, 256.0));
+    assert_eq!((e.effects[0].before, e.effects[0].after), (512.0, 320.0));
 
     // Pruning keeps whole periods of the 3 DeltaNet + 1 attention pattern and the last layer.
     let prune = find(&p, "prune-layers");

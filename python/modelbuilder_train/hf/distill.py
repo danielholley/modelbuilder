@@ -8,7 +8,10 @@ student is the same model with its modifications on:
   share the first one's cache);
 - trainable weights fake-quantized to their source format
   (``weight_fakequant``, from ``modelbuilder_quantization.json``), so the
-  result re-encodes losslessly with ``modelbuilder surgery replace``.
+  result re-encodes losslessly with ``modelbuilder surgery replace``;
+- multi-head latent attention, when the checkpoint comes from
+  ``modelbuilder surgery mla`` (``modelbuilder_mla`` in its config): the
+  student rebuilds K/V from the latent with partial RoPE (``hf/mla.py``).
 
 The teacher is the same weights with everything switched off: the original
 values of the trainable tensors and a plain cache. So no second copy of the
@@ -36,7 +39,7 @@ from torch.nn.utils import parametrize
 
 from modelbuilder_train import dist
 from modelbuilder_train.events import EventWriter
-from modelbuilder_train.hf import attention, fakequant
+from modelbuilder_train.hf import attention, fakequant, mla
 from modelbuilder_train.mtp.train import lr_at, supports_bf16
 from modelbuilder_train.spec import Hyper, TrunkDistill
 
@@ -119,6 +122,9 @@ def run_trunk_distill(
         formats = fakequant.load_manifest(model_dir / MANIFEST)
 
     mode = Mode()
+    mla_cfg = mla.load_config(model_dir)
+    if mla_cfg is not None:
+        mla.attach(model, model_dir, mla_cfg, mode)
     trainable: dict[str, nn.Parameter] = {}
     model.requires_grad_(False)
     for mod_name, mod in list(model.named_modules()):

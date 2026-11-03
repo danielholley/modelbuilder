@@ -1,8 +1,9 @@
 //! GQA/MHA → multi-head latent attention (MLA, DeepSeek-V2, arXiv
 //! 2405.04434, §2.1): K and V come from one shared latent of `kv_rank`
-//! dimensions per token, plus a small decoupled RoPE key of `rope_dim`
-//! dimensions, so the cache holds `kv_rank + rope_dim` values per token and
-//! layer.
+//! dimensions per token. As in MHA2MLA, each KV head keeps RoPE on `rope_dim`
+//! of its dimensions (DeepSeek's own MLA instead has one decoupled RoPE key
+//! shared by all heads), so the cache holds `kv_rank + kv_heads × rope_dim`
+//! values per token and layer.
 //!
 //! Converting a trained model follows MHA2MLA (Ji et al., 2025, arXiv
 //! 2502.14837): keep RoPE on a subset of dimensions (partial RoPE), then
@@ -34,10 +35,10 @@ struct P {
 
 impl Default for P {
     fn default() -> Self {
-        // DeepSeek-V2/V3: d_c = 512, d_h^R = 64.
+        // d_c = 512 as in DeepSeek-V2/V3; 32 RoPE dims (16 frequency pairs) per KV head is a heuristic.
         Self {
             kv_rank: 512,
-            rope_dim: 64,
+            rope_dim: 32,
         }
     }
 }
@@ -83,15 +84,23 @@ impl Feature for Mla {
                 g.spec.head_dim.unwrap_or(0),
             );
             let before = 2 * kv * hd;
-            if p.kv_rank + p.rope_dim >= before {
+            let after = p.kv_rank + kv * p.rope_dim;
+            if after >= before {
                 c.blockers.push(format!(
-                    "kv_rank + rope_dim = {} is not smaller than the current {before} cached values per token and layer ({kv} KV heads × {hd} × 2)",
-                    p.kv_rank + p.rope_dim
+                    "kv_rank + KV heads × rope_dim = {after} is not smaller than the current {before} cached values per token and layer ({kv} KV heads × {hd} × 2)",
                 ));
             }
-            if p.rope_dim > hd {
-                c.blockers
-                    .push(format!("rope_dim {} exceeds the head dim {hd}", p.rope_dim));
+            if p.rope_dim > hd || p.rope_dim % 2 != 0 || p.rope_dim == 0 {
+                c.blockers.push(format!(
+                    "rope_dim {} must be even, positive and at most the head dim {hd} (and the model's rotary dims, checked by the surgery)",
+                    p.rope_dim
+                ));
+            } else if p.kv_rank > kv * (2 * hd - p.rope_dim) {
+                c.blockers.push(format!(
+                    "kv_rank {} exceeds the {} stacked RoPE-free K and V rows",
+                    p.kv_rank,
+                    kv * (2 * hd - p.rope_dim)
+                ));
             }
         }
         c.warnings.push("Partial RoPE changes positional behavior in every converted layer; recovery needs real retraining, not just a finetune of the new projections.".into());
@@ -105,7 +114,8 @@ impl Feature for Mla {
         let per_layer_before = attn.first().map_or(0, |g| {
             2 * g.spec.num_kv_heads.unwrap_or(0) * g.spec.head_dim.unwrap_or(0)
         });
-        let per_layer_after = p.kv_rank + p.rope_dim;
+        let per_layer_after =
+            p.kv_rank + attn.first().map_or(0, |g| g.spec.num_kv_heads.unwrap_or(0)) * p.rope_dim;
         let n = layers.len() as f64;
         let effects = vec![Effect {
             metric: "KV cache per token (BF16)".into(),
@@ -151,7 +161,8 @@ impl Feature for Mla {
                 recovery: "A larger kv_rank, choosing which RoPE dimensions to keep by their contribution (MHA2MLA §3.1), more retraining tokens.".into(),
             },
             assumptions: vec![
-                format!("Cache after conversion: {per_layer_after} values per token and layer (kv_rank {} + rope_dim {}).", p.kv_rank, p.rope_dim),
+                format!("Cache after conversion: {per_layer_after} values per token and layer (kv_rank {} + KV heads × rope_dim {}).", p.kv_rank, p.rope_dim),
+                "Init: MHA2MLA's data-free partial RoPE (highest frequencies) and joint SVD; its best variant picks RoPE dimensions by query/key norms on calibration data, which isn't implemented.".into(),
                 "Trainable: the attention tensors of converted layers; the MLPs stay frozen.".into(),
                 "The token budget is a heuristic; MHA2MLA reports recovery with a small fraction of the original pretraining data on models up to 7B.".into(),
                 "Low-bit sources: the new projections are initialized in the primal basis, then rotated (if the source is rotated) and quantized to the source format.".into(),
@@ -172,10 +183,9 @@ impl Feature for Mla {
             .map(|g| g.layer)
             .collect();
         Ok(vec![
-            format!("In layers {layers:?}: replace attn_k/attn_v with attn_kv_a_mqa [{} , hidden] (latent + RoPE key), attn_kv_a_norm, attn_kv_b [heads × (nope + v), {}].", p.kv_rank + p.rope_dim, p.kv_rank),
-            "Initialize attn_kv_b · attn_kv_a from a truncated SVD of the stacked (non-RoPE) K and V projections, in the primal basis.".into(),
-            "Metadata: kv_lora_rank, rope dimension count, key/value head sizes, as the deepseek2 loader expects.".into(),
-            "Not implemented as surgery yet.".into(),
+            format!("In layers {layers:?}: add self_attn.mla.kv_a [{}, hidden] (the latent), kv_b [KV heads × (head_dim − {} + head_dim), {}] and k_rope [KV heads × {}, hidden]; the original k_proj/v_proj stay as the teacher.", p.kv_rank, p.rope_dim, p.kv_rank, p.rope_dim),
+            "Initialize kv_b · kv_a from a truncated joint SVD of the stacked RoPE-free K rows and V, in the primal basis (HF checkpoint from export-hf).".into(),
+            format!("Run it: `modelbuilder surgery mla <hf-dir> --kv-rank {} --rope-dim {} -o <dir>`, or `job trunk-distill --mla-rank {}` to convert and train in one go.", p.kv_rank, p.rope_dim, p.kv_rank),
         ])
     }
 

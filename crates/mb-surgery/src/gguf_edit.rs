@@ -12,7 +12,7 @@ use crate::{SurgeryError, SurgeryReport, WrittenTensor};
 
 type Kv = Vec<(String, MetaValue)>;
 
-fn gguf_kv(ir: &ModelIr) -> Result<(Kv, String), SurgeryError> {
+pub(crate) fn gguf_kv(ir: &ModelIr) -> Result<(Kv, String), SurgeryError> {
     if ir.raw.format != SourceFormat::Gguf {
         return Err(SurgeryError::Unsupported(
             "the input must be a GGUF file".into(),
@@ -30,7 +30,7 @@ fn gguf_kv(ir: &ModelIr) -> Result<(Kv, String), SurgeryError> {
     Ok((kv.clone(), arch))
 }
 
-fn check_output(ir: &ModelIr, out: &Path, overwrite: bool) -> Result<(), SurgeryError> {
+pub(crate) fn check_output(ir: &ModelIr, out: &Path, overwrite: bool) -> Result<(), SurgeryError> {
     if !out.exists() {
         return Ok(());
     }
@@ -59,7 +59,7 @@ fn int_like(like: &MetaValue, v: u64) -> MetaValue {
     }
 }
 
-fn set(kv: &mut Kv, key: &str, v: MetaValue) {
+pub(crate) fn set(kv: &mut Kv, key: &str, v: MetaValue) {
     match kv.iter_mut().find(|(k, _)| k == key) {
         Some(slot) => slot.1 = v,
         None => kv.push((key.to_string(), v)),
@@ -67,7 +67,7 @@ fn set(kv: &mut Kv, key: &str, v: MetaValue) {
 }
 
 /// `blk.{i}.rest` → `(i, rest)`.
-fn layer_of(name: &str) -> Option<(u32, &str)> {
+pub(crate) fn layer_of(name: &str) -> Option<(u32, &str)> {
     let rest = name.strip_prefix("blk.")?;
     let (i, rest) = rest.split_once('.')?;
     Some((i.parse().ok()?, rest))
@@ -279,7 +279,7 @@ pub fn set_yarn(
     })
 }
 
-fn file_len(p: &Path) -> Result<u64, SurgeryError> {
+pub(crate) fn file_len(p: &Path) -> Result<u64, SurgeryError> {
     Ok(std::fs::metadata(p)
         .map_err(|e| SurgeryError::Output(e.to_string()))?
         .len())

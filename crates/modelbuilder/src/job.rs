@@ -107,13 +107,20 @@ pub struct TrunkDistillArgs {
     /// Run directory: the HF export, job.json, the updates and the new GGUF go here.
     #[arg(long, short = 'o')]
     out: PathBuf,
-    /// Substrings of HF parameter names to train.
-    #[arg(
-        long,
-        value_delimiter = ',',
-        default_value = "k_proj.weight,v_proj.weight"
-    )]
-    trainable: Vec<String>,
+    /// Substrings of HF parameter names to train (default: `k_proj.weight,v_proj.weight`,
+    /// or `self_attn.mla.` with `--mla-rank`).
+    #[arg(long, value_delimiter = ',')]
+    trainable: Option<Vec<String>>,
+    /// Convert every attention layer to MLA with this latent rank
+    /// (`surgery mla`), then train the converted attention against the original.
+    #[arg(long)]
+    mla_rank: Option<usize>,
+    /// With `--mla-rank`: RoPE dimensions kept per KV head.
+    #[arg(long, default_value_t = 32)]
+    mla_rope_dim: usize,
+    /// With `--mla-rank`: which RoPE frequencies to keep (high or uniform).
+    #[arg(long, default_value = "high")]
+    mla_select: String,
     /// KV-cache format to train for: q8_0, q4_0 or nvfp4.
     #[arg(long)]
     kv_format: Option<String>,
@@ -348,8 +355,12 @@ fn trunk_distill(a: TrunkDistillArgs) -> Result<()> {
         Some("nvfp4") => Some(KvFormat::Nvfp4),
         Some(f) => bail!("unknown KV format {f}; use q8_0, q4_0 or nvfp4"),
     };
-    if kv_format.is_none() && a.kv_share_group.is_none() && a.no_weight_fakequant {
-        bail!("nothing to distill for: pass --kv-format and/or --kv-share-group");
+    if kv_format.is_none()
+        && a.kv_share_group.is_none()
+        && a.mla_rank.is_none()
+        && a.no_weight_fakequant
+    {
+        bail!("nothing to distill for: pass --kv-format, --kv-share-group and/or --mla-rank");
     }
     std::fs::create_dir_all(&a.out)?;
     let out = absolute(&a.out)?;
@@ -378,6 +389,30 @@ fn trunk_distill(a: TrunkDistillArgs) -> Result<()> {
         );
     }
 
+    // MLA: the converted checkpoint links the export (the teacher) and adds the latent.
+    let model_dir = match a.mla_rank {
+        None => "hf",
+        Some(kv_rank) => {
+            let (m, _) = open(&hf)?;
+            let opts = mb_surgery::mla::MlaOptions {
+                kv_rank,
+                rope_dim: a.mla_rope_dim,
+                select: a.mla_select.parse().map_err(anyhow::Error::msg)?,
+                overwrite: true,
+            };
+            let report = mb_surgery::mla::convert(&m, &hf, &opts, &out.join("mla"))?;
+            print!("{}", render::mla(&report));
+            "mla"
+        }
+    };
+    let trainable = a.trainable.clone().unwrap_or_else(|| {
+        if a.mla_rank.is_some() {
+            vec!["self_attn.mla.".into()]
+        } else {
+            vec!["k_proj.weight".into(), "v_proj.weight".into()]
+        }
+    });
+
     let mut hyper = Hyper::trunk_distill_default();
     macro_rules! set {
         ($($f:ident),*) => { $(if let Some(v) = a.$f { hyper.$f = v; })* };
@@ -396,19 +431,20 @@ fn trunk_distill(a: TrunkDistillArgs) -> Result<()> {
     if a.fp32 {
         hyper.dtype = TrainDtype::Float32;
     }
-    let name = match (kv_format, a.kv_share_group) {
-        (Some(_), Some(_)) => "kv-quant-share-qat",
-        (Some(_), None) => "kv-quant-qat",
-        (None, Some(_)) => "kv-share-qat",
-        (None, None) => "weight-qat",
+    let name = match (a.mla_rank, kv_format, a.kv_share_group) {
+        (Some(_), _, _) => "mla-recover",
+        (None, Some(_), Some(_)) => "kv-quant-share-qat",
+        (None, Some(_), None) => "kv-quant-qat",
+        (None, None, Some(_)) => "kv-share-qat",
+        (None, None, None) => "weight-qat",
     };
     let spec = mb_jobs::trunk_distill_spec(TrunkDistillInputs {
         job_id: format!("{name}-{}", stem(&a.target)),
         stage_name: name.into(),
         output_dir: ".".into(),
-        model: "hf".into(),
+        model: model_dir.into(),
         texts: absolute(&a.texts)?,
-        trainable: a.trainable,
+        trainable,
         kv_format,
         kv_share_group: a.kv_share_group,
         weight_fakequant: !a.no_weight_fakequant,
@@ -420,6 +456,25 @@ fn trunk_distill(a: TrunkDistillArgs) -> Result<()> {
     spec.write(&spec_path)?;
     println!("wrote {}", spec_path.display());
     let new = out.join(format!("{}-{name}.gguf", stem(&a.target)));
+    if a.mla_rank.is_some() {
+        // No GGUF runtime runs this layout, so there is no write-back.
+        if a.emit_only {
+            println!(
+                "\nRun it with:\n  modelbuilder job run {}",
+                spec_path.display()
+            );
+            return Ok(());
+        }
+        let outputs = launch(&spec_path, &a.py)?;
+        print_outputs(&outputs);
+        println!(
+            "\nThe converted model is {} with the trained tensors in {}.\n\
+             No GGUF runtime runs MLA outside DeepSeek's architecture, so it stays in HF form.",
+            out.join("mla").display(),
+            out.join("updates").display()
+        );
+        return Ok(());
+    }
     if a.emit_only {
         println!(
             "\nRun it with:\n  modelbuilder job run {}\nthen write the tensors back with:\n  \

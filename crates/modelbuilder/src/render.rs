@@ -558,3 +558,26 @@ pub fn surgery(r: &mb_surgery::SurgeryReport) -> String {
     }
     s
 }
+
+pub fn mla(r: &mb_surgery::mla::MlaReport) -> String {
+    let mut s = format!(
+        "WROTE {}\n\nLAYERS (K/V energy kept, relative error)\n",
+        r.output.display()
+    );
+    for l in &r.layers {
+        s += &format!(
+            "  {:>4}  {:>7.3}%  {:.2e}\n",
+            l.layer,
+            100.0 * l.energy_kept,
+            l.rel_error
+        );
+    }
+    s += &format!(
+        "\nKV CACHE  {} → {} values per token and layer\nROPE      frequencies kept {:?}\n\nNOTES\n",
+        r.cache_before, r.cache_after, r.rope_freqs
+    );
+    for n in &r.notes {
+        s += &format!("  {n}\n");
+    }
+    s
+}

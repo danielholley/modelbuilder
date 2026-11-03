@@ -103,6 +103,9 @@ impl Feature for MoeUpcycle {
         if ctx.report.quantization.trunk_bits_per_param < 4.0 {
             c.warnings.push("low-bit source: expert copies stay exact, but continued pretraining at this scale means QAT at the source format for every expert".into());
         }
+        if p.every > 1 {
+            c.warnings.push("every > 1 leaves dense layers between MoE ones; the surgery's llama.cpp targets (llama, qwen3moe) expect every layer to be MoE, so it upcycles all layers".into());
+        }
         c.warnings.push("Upcycling pays off only with substantial continued pretraining; a short finetune leaves the model no better than the dense one.".into());
         Ok(c)
     }
@@ -175,7 +178,7 @@ impl Feature for MoeUpcycle {
             format!("In layers {layers:?}: ffn_{{gate,up,down}} → ffn_{{gate,up,down}}_exps with {} copies stacked along a new leading axis. Quantized blocks are copied, not re-encoded, so the copies are exact.", p.experts),
             format!("Add ffn_gate_inp [{}, hidden] (router, F32), initialized small and random.", p.experts),
             format!("Metadata: expert_count = {}, expert_used_count = {}.", p.experts, p.top_k),
-            "Not implemented as surgery yet.".into(),
+            "Run it: `modelbuilder surgery upcycle <model.gguf> --experts N --top-k K -o out.gguf` (llama → Mixtral layout, qwen3 → qwen3moe; every layer).".into(),
         ])
     }
 

@@ -288,6 +288,55 @@ fn write_value(w: &mut impl Write, v: &MetaValue) -> std::io::Result<()> {
 /// Writes a GGUF v3 file. Tensor data is streamed in the given order.
 /// Alignment comes from `general.alignment` in `kv` if present.
 pub fn write(path: &Path, kv: &[(String, MetaValue)], tensors: &[TensorToWrite<'_>]) -> Result<()> {
+    let parts: Vec<TensorParts<'_>> = tensors
+        .iter()
+        .map(|t| TensorParts {
+            name: t.name.clone(),
+            dtype: t.dtype,
+            shape: t.shape.clone(),
+            parts: vec![&t.data[..]],
+        })
+        .collect();
+    write_parts(path, kv, &parts)
+}
+
+/// A tensor whose data is the concatenation of borrowed parts, e.g. one
+/// tensor's bytes repeated to stack MoE experts without copying them in memory.
+pub struct TensorParts<'a> {
+    pub name: String,
+    pub dtype: DType,
+    pub shape: Vec<u64>,
+    pub parts: Vec<&'a [u8]>,
+}
+
+impl TensorParts<'_> {
+    fn len(&self) -> u64 {
+        self.parts.iter().map(|p| p.len() as u64).sum()
+    }
+
+    fn check_size(&self) -> Result<()> {
+        let n: u64 = self.shape.iter().product();
+        match self.dtype.storage_bytes(n) {
+            Some(b) if b != self.len() => Err(Error::Tensor {
+                name: self.name.clone(),
+                msg: format!(
+                    "{} {:?} needs {b} bytes, got {}",
+                    self.dtype,
+                    self.shape,
+                    self.len()
+                ),
+            }),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// [`write`] for tensors given as parts.
+pub fn write_parts(
+    path: &Path,
+    kv: &[(String, MetaValue)],
+    tensors: &[TensorParts<'_>],
+) -> Result<()> {
     let alignment = kv
         .iter()
         .find(|(k, _)| k == ALIGNMENT_KEY)
@@ -335,15 +384,17 @@ pub fn write(path: &Path, kv: &[(String, MetaValue)], tensors: &[TensorToWrite<'
             }
             header.extend_from_slice(&id.to_le_bytes());
             header.extend_from_slice(&offset.to_le_bytes());
-            offset = align(offset + t.data.len() as u64, alignment);
+            offset = align(offset + t.len(), alignment);
         }
         w.write_all(&header)?;
         let zeros = vec![0u8; alignment as usize];
         let pad = |len: u64| (align(len, alignment) - len) as usize;
         w.write_all(&zeros[..pad(header.len() as u64)])?;
         for t in tensors {
-            w.write_all(&t.data)?;
-            w.write_all(&zeros[..pad(t.data.len() as u64)])?;
+            for p in &t.parts {
+                w.write_all(p)?;
+            }
+            w.write_all(&zeros[..pad(t.len())])?;
         }
         w.flush()
     })();

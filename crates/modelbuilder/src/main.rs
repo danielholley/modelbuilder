@@ -180,6 +180,49 @@ enum SurgeryOp {
         #[arg(long)]
         force: bool,
     },
+    /// Dense → MoE sparse upcycling: every layer's MLP becomes `--experts`
+    /// copies (stored bytes repeated, never re-encoded) plus a random router.
+    /// Supports llama (Mixtral layout) and qwen3 (→ qwen3moe).
+    Upcycle {
+        target: PathBuf,
+        #[arg(long, default_value_t = 8)]
+        experts: u32,
+        #[arg(long, default_value_t = 2)]
+        top_k: u32,
+        /// Standard deviation of the router's Gaussian initialization.
+        #[arg(long, default_value_t = 0.02)]
+        router_std: f32,
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+        #[arg(long, short = 'o')]
+        out: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
+    /// Convert every attention layer of a Hugging Face checkpoint (e.g. from
+    /// `export-hf`) to multi-head latent attention (MHA2MLA: partial RoPE plus
+    /// a joint SVD of K/V). Writes a new directory that links the original
+    /// weights (the teacher) and adds `mla.safetensors`; recover the quality
+    /// with `job trunk-distill --mla-rank`.
+    Mla {
+        /// HF checkpoint directory.
+        source: PathBuf,
+        /// Latent rank shared by K and V.
+        #[arg(long)]
+        kv_rank: usize,
+        /// RoPE dimensions kept per KV head (even).
+        #[arg(long)]
+        rope_dim: usize,
+        /// Which RoPE frequencies to keep: high or uniform.
+        #[arg(long, default_value = "high")]
+        select: String,
+        #[arg(long, short = 'o')]
+        out: PathBuf,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Enable YaRN RoPE scaling in a GGUF's metadata (context × factor).
     Yarn {
         target: PathBuf,
@@ -400,6 +443,58 @@ fn main() -> Result<()> {
                 .with_context(|| format!("opening {}", target.display()))?;
             let ir = ModelIr::from_raw(t.raw.clone());
             let report = mb_surgery::gguf_edit::prune_layers(&t, &ir, a, b - a, &out, force)?;
+            print!("{}", render::surgery(&report));
+        }
+        Command::Surgery {
+            op:
+                SurgeryOp::Mla {
+                    source,
+                    kv_rank,
+                    rope_dim,
+                    select,
+                    out,
+                    force,
+                    json,
+                },
+        } => {
+            let m = mb_formats::open(&source)
+                .with_context(|| format!("opening {}", source.display()))?;
+            let opts = mb_surgery::mla::MlaOptions {
+                kv_rank,
+                rope_dim,
+                select: select.parse().map_err(anyhow::Error::msg)?,
+                overwrite: force,
+            };
+            let report = mb_surgery::mla::convert(&m, &source, &opts, &out)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", render::mla(&report));
+            }
+        }
+        Command::Surgery {
+            op:
+                SurgeryOp::Upcycle {
+                    target,
+                    experts,
+                    top_k,
+                    router_std,
+                    seed,
+                    out,
+                    force,
+                },
+        } => {
+            let t = mb_formats::open(&target)
+                .with_context(|| format!("opening {}", target.display()))?;
+            let ir = ModelIr::from_raw(t.raw.clone());
+            let opts = mb_surgery::upcycle::UpcycleOptions {
+                experts,
+                top_k,
+                router_std,
+                seed,
+                overwrite: force,
+            };
+            let report = mb_surgery::upcycle::upcycle(&t, &ir, &opts, &out)?;
             print!("{}", render::surgery(&report));
         }
         Command::Surgery {
