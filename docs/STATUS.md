@@ -1,8 +1,10 @@
 # Status and plan
 
 What has been built so far, what it was checked against, what is missing, and
-the plan for the next three pieces of work. As of 2026-09-28 (PRs up to #8 merged, later work on the branch below). The design is in [`CLAUDE.md`](../CLAUDE.md), and the research
-behind each technique is in [`docs/research/`](research/).
+what comes next. As of 2026-11-03 (PRs up to #9 merged; the branch
+`claude/upbeat-babbage-9bw8ij` adds the work under *Added after PR #9*). The
+design is in [`CLAUDE.md`](../CLAUDE.md), and the research behind each
+technique is in [`docs/research/`](research/).
 
 ## Goal
 
@@ -24,20 +26,67 @@ speculative decoding and **DeepSeek-V4.1-Flash-style KV cache changes**.
 | #5 | MTP surgery: port the Qwen3.8 MTP head into a GGUF sidecar for Bonsai 2 (`surgery mtp`) |
 | #6 | The Python training side (`python/modelbuilder_train`, torch backend): the `mtp_align` stage, the job-spec and event schemas (`schema/`), `mb-jobs`, `export-tensors`, `modelbuilder job mtp-align` / `job run` |
 | #7 | Dashboards: `mb-api` (operations and types), `mb-server` (web API, localhost-only, SSE), `web/` (React: Inspect, Weights, Plan, Jobs), `mb-tui` (terminal), `modelbuilder serve` / `tui`, TypeScript types generated from Rust |
+| #8 | The cluster path for MTP alignment: fp32 on pre-Ampere GPUs and a `4xP40` profile, `generate-corpus`, sharded `extract-features` over `llama-server`, DDP for `mtp_align`, `bench-draft`, the [runbook](runbooks/bonsai2-mtp.md), `export-hf` |
+| #9 | Architecture adapters (`llama`, `qwen2`, `qwen3`, `qwen35`); ggml's reference encoders (Q8_0, PQ2_0, PTQ1_0); `surgery replace`; the `trunk_distill` stage (KV-cache QAT, cross-layer KV sharing, weights fake-quantized through their stored format); stage ordering in the planner; probes (`perplexity`, `needle`, `kv-cache`, `hf-vs-gguf`); the `mla`, `draft-head`, `yarn`, `prune-layers` and `moe-upcycle` plugins; `surgery prune` and `surgery yarn` |
+
+## Added after PR #9 (branch `claude/upbeat-babbage-9bw8ij`)
+
+- **`surgery upcycle`** (dense → MoE, Komatsuzaki et al.): every layer's MLP
+  becomes `--experts` copies plus a random router. Expert tensors repeat the
+  stored bytes (`gguf::write_parts` streams them from the mmap), so ternary
+  and rotated sources stay exact and `prism.hadamard.weight_names` is renamed
+  to the expert tensors. Maps `llama` (Mixtral layout) and `qwen3` →
+  `qwen3moe`; llama.cpp renormalizes top-k weights for both, so the result
+  computes the dense function until trained. `qwen35` is refused: its MoE
+  counterpart expects a shared expert, a layout not verified yet.
+- **`surgery mla`** (MHA2MLA, arXiv 2502.14837): partial RoPE per KV head
+  (data-free `high` or `uniform` frequency choice) and a joint SVD of the
+  RoPE-free K rows and V into a latent (`kv_a`, `kv_b`, `k_rope`), written to
+  `mla.safetensors` next to links to the original HF weights, which are the
+  teacher. `trunk_distill` switches the student to the latent through hooks
+  on `k_proj`/`v_proj` and the rotary embedding (`hf/mla.py`), so Q/K norms,
+  gating and partial-rotary models work unchanged. Exact at full rank on
+  llama, qwen2 (biases), qwen3 (Q/K norms) and a Qwen3.5 hybrid (partial
+  RoPE); `job trunk-distill --mla-rank` converts and trains in one go. The
+  `mla` plugin now counts RoPE dims per KV head, as MHA2MLA does.
+- **The `draft_align` stage**: Medusa heads (zero-initialized residual
+  blocks, own or shared LM head, 0.8^k weighting) and an EAGLE drafter (fc
+  over [embedding; feature], decoder layers of the target's shape, no input
+  norm in the first, SmoothL1 + 0.1·CE), trained from the same precomputed
+  features as `mtp_align`. New stage kind in the schema, Rust and pydantic
+  types; `modelbuilder job draft-align`.
+- **`trunk_distill` options**:
+  - `teacher`: a separate checkpoint to distill from (e.g. the unpruned
+    original);
+  - `loss = "ce"`: next-token training on the texts (long-context finetunes);
+  - `lora_rank`: LoRA factors inside the fake-quant parametrization, so the
+    merged tensor still writes back exactly.
+
+  `export-hf` writes a GGUF's YaRN scaling into the HF config, so a finetune
+  after `surgery yarn` trains with the scaling transformers applies.
+- **Plan pipeline**: each plugin lists the commands that apply it
+  (`Feature::pipeline`); the planner orders them like the schedule and
+  chains the GGUFs they produce. Shown by `plan` and on the web Plan page.
+  Prune healing, KV-share long-context adaptation and the YaRN finetune now
+  have runners.
+- **LoRA in the cost model**: a `with_lora` fit tier, priced per profile,
+  before the packed-trunk tier.
 
 ### Commands that work today
 
 ```sh
 modelbuilder inspect <model>                       # architecture, params, quantization, KV cache, provenance
 modelbuilder stats <model> [--kv-spectra]          # streamed weight statistics and K/V spectra
-modelbuilder plan <model> [-f feature[:k=v]]...    # compatibility, stages, cost per hardware profile
-modelbuilder surgery mtp <target.gguf> --from <hf-ref> -o <sidecar.gguf>
+modelbuilder plan <model> [-f feature[:k=v]]...    # compatibility, stages, cost per profile, and the pipeline of commands
+modelbuilder surgery mtp|prune|yarn|upcycle|replace ...   # GGUF surgery
+modelbuilder surgery mla <hf-dir> --kv-rank R --rope-dim r -o <dir>
+modelbuilder export-hf <model.gguf> --reference <hf-dir> -o <hf-out>
 modelbuilder export-tensors <model> --names a,b -o out.safetensors
-modelbuilder job mtp-align <target.gguf> --from <hf-ref> --features <dir> -o runs/<name>
+modelbuilder job mtp-align | draft-align | trunk-distill ...   # write a job spec, run it, finish (sidecar / write-back)
 modelbuilder job run runs/<name>/job.json
 modelbuilder serve                                 # web dashboard on http://localhost:7878
 modelbuilder tui [<model>] [--job job.json | --events events.jsonl]
-python -m modelbuilder_train extract-features | run | validate | evaluate-mtp
+python -m modelbuilder_train generate-corpus | extract-features | run | validate | evaluate-mtp | bench-draft | probe ...
 ```
 
 ### Measured on the real model
@@ -59,172 +108,50 @@ python -m modelbuilder_train extract-features | run | validate | evaluate-mtp
 
 ### Test coverage
 
-75 Rust tests, 25 Python tests (including an end-to-end run through the Rust
-binary on fixtures) and 7 web tests, all in CI. Every test uses tiny synthetic
-checkpoints; nothing downloads a model.
-
-## Added after PR #8 (branch `claude/cool-feynman-b75slo`)
-
-Everything below works on any model with a matching architecture adapter.
-Nothing in the code names a specific model; notes about the first target
-live in `docs/runbooks/` and `docs/research/`.
-
-- **Architecture adapters** (`mb-surgery/src/arch.rs`): tables for `llama`,
-  `qwen2`, `qwen3` and `qwen35` that invert llama.cpp's converter (RoPE
-  permutes, norm offsets, V-head reorders, conv shapes). `export-hf` and
-  `surgery replace` both use them. GGUF → HF → GGUF is byte-identical on the
-  llama and hybrid-ternary fixtures.
-- **Encoders** (`mb-formats/src/quant.rs`): ggml's reference quantizers for
-  Q8_0, PQ2_0 and PTQ1_0, byte-identical on the fork's golden blocks.
-- **`surgery replace`**: writes trained HF tensors back into a GGUF,
-  re-rotated and re-encoded to each tensor's original type. It reports each
-  tensor's re-quantization error and refuses above `--max-rel-error`.
-- **The `trunk_distill` stage** (hf backend, `python/modelbuilder_train/hf/`):
-  - QAT for a quantized KV cache (`q8_0`, `q4_0`, `nvfp4`);
-  - cross-layer KV sharing;
-  - weights fake-quantized through their stored format and rotation, so the
-    write-back is exact (0.000% on the fixtures, including rotated PQ2_0).
-
-  `modelbuilder job trunk-distill` chains export → train → write-back. It
-  works with any transformers model through a registered attention
-  implementation.
-- **Stage ordering**: the planner schedules restructure → adapt → frozen, and
-  prices precomputed-feature stages correctly (extraction is shown
-  separately).
-- **Probes** (`probe perplexity | needle | kv-cache | hf-vs-gguf`):
-  llama.cpp perplexity and needle retrieval per KV-cache type, and a
-  token-by-token check of an HF export against its GGUF.
-- **Catalog**: `mla` (MHA2MLA/TransMLA), `draft-head` (Medusa, EAGLE,
-  DSpark), `yarn`, `prune-layers` (Gromov et al.) and `moe-upcycle` (sparse
-  upcycling). Each has cited sources, and all are tested in
-  `mb-plan/tests/plan.rs`.
-- **GGUF surgery**:
-  - `surgery prune`: layers are dropped and renumbered, and per-layer
-    metadata and tensor-name lists are kept in sync. It refuses cuts that
-    break an interval-based layer pattern.
-  - `surgery yarn`: sets the RoPE scaling metadata.
+104 Rust tests, 68 Python tests (including end-to-end runs through the Rust
+binary on fixtures: MTP alignment, KV QAT, MLA recovery, healing a pruned
+model against its original, LoRA write-back, draft heads) and 7 web tests,
+all in CI. Every test uses tiny synthetic checkpoints; nothing downloads a
+model.
 
 ## Not done yet
 
-- **Real-model checks of the new pipeline**:
-  - `hf-vs-gguf` on a pruned copy of the target (about 17 GB of disk for a
-    4-layer f32 export, most of it the 248K-vocabulary embedding and LM head);
-  - a trunk-distill run on GPUs.
+These need hardware, data or runtime code that isn't in this repository:
 
-  Steps are in [`docs/runbooks/verify-export-and-kv-qat.md`](runbooks/verify-export-and-kv-qat.md).
-- **The quantized-KV measurement** on the target (the `probe kv-cache`
-  sweep), to decide whether QAT is needed.
-- **Runtime for KV sharing**: training works, but no llama.cpp build runs
-  reuse layers, and `surgery replace` doesn't drop the reuse layers' K/V.
-- **Surgery for `mla` and `moe-upcycle`**: they are planned only. The outlines
-  say what would change.
-- **Draft-head training** for Medusa/EAGLE/DSpark: only `mtp_align` has a
-  training stage.
-- **Other backends:** `mlx`, `torchtitan`. The `hf` stage runs on one GPU per
-  process, with DDP over gradients only; there is no FSDP yet.
+- **Real-model checks of the newer pipeline** (steps in
+  [`verify-export-and-kv-qat.md`](runbooks/verify-export-and-kv-qat.md)):
+  - `probe hf-vs-gguf` on a pruned copy of the target (about 17 GB of disk);
+  - a `trunk_distill` run on GPUs;
+  - the quantized-KV measurement (`probe kv-cache`), which decides whether
+    KV QAT is worth its cost on the target.
+- **Runtime support** that lives in llama.cpp (or the PrismML fork), not here:
+  - KV-sharing reuse layers: training works, but no build runs them, so the
+    written-back GGUF still carries every layer's K/V;
+  - MLA outside DeepSeek's architecture: a converted model stays in HF form;
+  - Medusa/EAGLE-1 heads in GGUF: the drafters are written as safetensors
+    for runtimes that load them (e.g. vLLM).
+- **Runtime checks of `surgery upcycle`**: the structure is tested and
+  `inspect` reads it as MoE, but no llama.cpp run has compared the upcycled
+  model's logits with the dense one's yet. `qwen35` → `qwen35moe` needs the
+  shared-expert layout checked against the loader first.
+- **DSpark drafters**: the paper describes the drafter but there is no
+  public reference code to follow.
+- **MLA RoPE-dimension choice by query/key norms** (MHA2MLA's best variant)
+  needs calibration activations; only the data-free choices exist.
+- **Backends**: `mlx` (Apple Silicon runs the torch backend on MPS today) and
+  a multi-node pretraining backend (`torchtitan`), which continued
+  pretraining at upcycling scale needs. The `hf` stage runs on one device
+  per process (DDP over gradients); there is no FSDP or model-parallel trunk
+  yet, so a 27B trunk needs one device that holds it.
 
-## Why a real training run isn't practical yet
+## Next
 
-A user asked whether they can pull `main` and train on their own servers.
-Partly:
-
-1. **No corpus.** `extract-features` needs a `texts.jsonl`, and nothing
-   generates one. For alignment the right data is the model's *own*
-   generations (self-distillation).
-2. **Feature extraction doesn't scale.** It starts `llama-tokenize` and
-   `llama-embedding` once per text, so the 7 GB model is reloaded every time.
-   It also stores 10 KB per token (5120 bf16 values): 50 M tokens is 500 GB,
-   and the plan's 500 M–2 B tokens would be 5–20 TB.
-3. **No acceptance benchmark.** Nothing measures the aligned sidecar in
-   llama.cpp against the unaligned port.
-4. **No runbook** for a fresh server: building the fork with CUDA, installing
-   CUDA PyTorch, fetching only the reference model's `mtp.*` tensors instead
-   of 54 GB.
-
-## Plan
-
-The order puts the user's servers to work first.
-
-### 1. Make a real MTP alignment run work on a GPU server
-
-- **Corpus generation:** a new `modelbuilder_train generate-corpus` command.
-  It drives the fork's `llama-server` (chat template, parallel slots) over a
-  prompt set and writes the model's generations as JSONL, the
-  self-distillation data the `mtp` plugin's estimate calls for.
-- **Online trunk features:** stop storing hidden states. Run the frozen trunk
-  in PyTorch during training and feed its post-norm hidden states straight to
-  the head:
-  - `modelbuilder export-hf`: stream a `qwen35` GGUF into an HF Qwen3.5
-    checkpoint (config.json plus sharded bf16 safetensors, primal basis,
-    norms with the +1 removed). It is the exact inverse of the fork's
-    converter (`conversion/qwen.py`), so transformers' `Qwen3_5` model loads
-    it.
-  - `mtp_align` gains a `trunk` source (an HF directory) next to `features`.
-    The trunk runs in bf16 with no gradients, split across GPUs with a device
-    map when it doesn't fit on one. It needs about 54 GB for the trunk: one
-    80 GB GPU or two 48 GB GPUs. Precomputed features stay for small cards
-    and for validation.
-  - Verify the export against llama.cpp. On the real model, compare the
-    PyTorch trunk's hidden states with llama.cpp's on the texts already
-    extracted. On a machine without the RAM, run it layer by layer. Pass
-    means cosine ≈ 1 up to bf16 noise.
-- **Faster extraction for the features path:** one long-running
-  `llama-server --embeddings --pooling none`, fed token ids so the positions
-  line up, instead of a process per text.
-- **Acceptance benchmark:** a new `modelbuilder_train bench-draft` command
-  that runs the fork's speculative decoding with each sidecar on the same
-  prompts and reports acceptance and tokens/s. It compares the ported and
-  aligned heads.
-- **Runbook and script:** `docs/runbooks/bonsai2-mtp.md` and
-  `scripts/bonsai2-mtp.sh`, covering the whole run: build, fetch, corpus,
-  export, train, sidecar and benchmark, with the GPU memory each step needs.
-- **Checked here where possible:** a short real run on this 16 GB CPU box to
-  prove every step on the real model, then the full run on the servers.
-
-### 2. Restructuring: FP4 KV first
-
-The research rates FP4 KV as low risk and a direct fit for the 16 GQA layers
-(64 → 18 KiB/token, 16 → 4.5 GiB at 262K). The fork already has quantized KV
-cache types. Cross-layer KV sharing is medium–high risk, is untested as a
-retrofit, and needs new runtime kernels, so it comes after.
-
-- **The trunk in PyTorch** comes from the `export-hf` work in item 1.
-- **A `kv_quant_qat` stage** on a new `hf` backend:
-  - Fake-quantize K after RoPE and V, as the paper does, with a
-    straight-through estimator.
-  - Two formats: `q4_0`, what the fork's KV cache can run today, and
-    `nvfp4` (E2M1 plus an E4M3 scale per 16 channels), the paper's format
-    with no runtime yet.
-  - Train only the full-attention layers' `k_proj`, `v_proj` and `k_norm`
-    (168 M parameters). The loss is KL against the same model with an
-    unquantized cache: the teacher is the same weights with fake-quant off,
-    so there is no second copy.
-  - Keep trained weights ternary: fake-quantize them in the rotated basis
-    (rotate, ternarize per 128-group, rotate back), so export can re-encode
-    them as PQ2_0 with no extra loss.
-- **Surgery back to GGUF:** a PQ2_0 encoder in `mb-formats` and a new
-  `surgery replace` step. It writes the trained tensors into a copy of the
-  GGUF, re-rotated and re-quantized to the source type, and keeps the
-  `prism.hadamard.*` metadata in sync.
-- **Evaluate:** perplexity and needle retrieval at long context with the
-  quantized cache, before and after QAT. This is also the start of the probes
-  layer.
-- **Then `kv-share`:** grouped K/V reuse across the 16 GQA layers, which needs
-  kernels in the fork.
-
-### 3. Stage ordering in the planner
-
-- Each training stage says how it uses the trunk: it *restructures* it (e.g.
-  `kv-share` reuse-adapt), *adapts* existing weights (e.g. `fp4-kv` QAT), or
-  keeps it *frozen* and reads its outputs (e.g. `mtp-align`).
-- The planner orders stages as restructure, then adapt, then frozen. A stage
-  trained against the trunk is invalidated by any later change to it. So an
-  MTP head is aligned last, and QAT runs after structural KV changes so it
-  quantizes the final K/V. Within a feature, the plugin's order is kept.
-- `Plan` gains a `schedule` (ordered stages, with the reason for each
-  position) and totals per hardware profile (summed GPU-hours and wall-clock
-  time, the peak memory, and the worst fit). All three UIs show it.
-- Later, `plan` can emit one multi-stage job spec for the whole schedule.
+1. Run the real-model checks above on the cluster (item 6 and 8 of the
+   revised order below).
+2. Verify `surgery upcycle` in llama.cpp on a small dense model (logits equal
+   to the dense model's before training), then check the `qwen35moe` loader.
+3. A sharded trunk for `trunk_distill` (FSDP2 or a device map), so
+   restructuring stages fit on several smaller GPUs.
 
 ## Target hardware (the user's cluster)
 
@@ -269,30 +196,22 @@ What that changes:
 
 ### Revised order
 
-1. Force fp32 on pre-Ampere GPUs, and add a `4xP40` hardware profile to the
-   planner.
-2. `generate-corpus` over `llama-server`, sharded by machine.
-3. `extract-features` over `llama-server`, sharded, with `FeatureSet`
-   reading many directories.
-4. DDP for `mtp_align` (`torchrun`).
-5. A runbook for this cluster, plus `bench-draft` for acceptance.
+1. ✅ Force fp32 on pre-Ampere GPUs; a `4xP40` hardware profile.
+2. ✅ `generate-corpus` over `llama-server`, sharded by machine.
+3. ✅ `extract-features` over `llama-server`, sharded, with `FeatureSet`
+   reading many directories. Checked on the real model: features match the
+   old path at cosine 1.000000 and the tokens match the HF tokenizer (it also
+   exposed a bug in the old path: llama.cpp unescapes `\t` in prompt text).
+4. ✅ DDP for `mtp_align` (`torchrun`).
+5. ✅ The [runbook](runbooks/bonsai2-mtp.md) and `bench-draft`. On the real
+   model the ported head accepts 20 of 23 drafts on a code prompt, a 1.93×
+   speedup on CPU.
 6. Verify `export-hf` on the real model (per-tensor cosine against
-   Qwen3.8-27B; hidden states against llama.cpp).
-7. Stage ordering in the planner.
-8. Measure quantized-KV quality (perplexity, long-context retrieval), then
-   decide on QAT.
-
-Done so far on this list:
-- items 1–5: the fp32 fallback and the `4xP40` profile; `generate-corpus`
-  and server-based, sharded `extract-features`; DDP; `bench-draft`; and the
-  runbook [`docs/runbooks/bonsai2-mtp.md`](runbooks/bonsai2-mtp.md).
-- The server path was checked on the real model: features match the old
-  path at cosine 1.000000, and the tokens match the HF tokenizer. It also
-  exposed a bug in the old path: llama.cpp unescapes `\t` in prompt text.
-- `bench-draft` on the real model: the ported head accepts 20 of 23 drafts
-  on a code prompt, a 1.93× speedup on CPU.
-- Also done: `export-hf` itself (commit `c4225d0`). It loads in
-transformers on fixtures; the real-model check is item 6.
+   Qwen3.8-27B; hidden states against llama.cpp with `probe hf-vs-gguf`).
+   `export-hf` itself is done and loads in transformers on fixtures.
+7. ✅ Stage ordering in the planner, and now the pipeline of commands.
+8. Measure quantized-KV quality (`probe kv-cache`: perplexity, long-context
+   retrieval), then decide on QAT.
 
 ## Open questions
 

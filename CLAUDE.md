@@ -22,13 +22,15 @@ wrong*. It then carries the change through to an exported model.
 
 The Rust core exists: `mb-ir`, `mb-formats`, `mb-analyze`, `mb-fixtures`,
 `mb-features` (plugin trait, eight plugins, cost model), `mb-plan` (recipes,
-plans and stage scheduling), `mb-surgery` (architecture adapters, GGUF↔HF
-export and write-back, MTP head port, pruning, YaRN), `mb-jobs` (job specs and
-the Python launcher), `mb-api`, `mb-server` and `mb-tui` (dashboards), and the
+plans, stage scheduling and the pipeline of commands), `mb-surgery`
+(architecture adapters, GGUF↔HF export and write-back, MTP head port, pruning,
+YaRN, MoE upcycling, MLA conversion), `mb-jobs` (job specs and the Python
+launcher), `mb-api`, `mb-server` and `mb-tui` (dashboards), and the
 `modelbuilder` binary. The Python side (`python/modelbuilder_train`) trains an
 MTP head against a frozen trunk (`mtp_align`, see `docs/research/mtp-align.md`),
-retrains trunk tensors with KV-cache or weight QAT (`trunk_distill`), and runs
-probes. The React UI is in `web/`. Anything in the layout below not marked ✅
+Medusa and EAGLE drafters (`draft_align`), retrains trunk tensors with KV-cache
+or weight QAT, MLA recovery, healing against a teacher or long-context
+finetunes, optionally through LoRA (`trunk_distill`), and runs probes. The React UI is in `web/`. Anything in the layout below not marked ✅
 is the target design, not code yet. Update this file when the real layout
 differs.
 
@@ -71,7 +73,11 @@ cargo run --release -- export-hf <model.gguf> --reference <hf-dir> [--dtype f32]
 cargo run --release -- surgery replace <model.gguf> --updates <hf-dir> -o new.gguf [--max-rel-error 1e-3]
 cargo run --release -- surgery prune <model.gguf> --layers a..b -o new.gguf
 cargo run --release -- surgery yarn <model.gguf> --factor 4 -o new.gguf
+cargo run --release -- surgery upcycle <model.gguf> --experts 8 --top-k 2 -o new.gguf   # llama, qwen3
+cargo run --release -- surgery mla <hf-dir> --kv-rank 512 --rope-dim 32 -o <mla-dir>
 cargo run --release -- job trunk-distill <model.gguf> --reference <hf-dir> --texts t.jsonl --kv-format q4_0 -o runs/<name>
+#   also: --kv-share-group N | --mla-rank R | --teacher <orig.gguf> | --loss ce | --lora-rank r | --trainable a,b
+cargo run --release -- job draft-align <target.gguf> --kind medusa|eagle --features <dir> [--reference <hf-dir>] -o runs/<name>
 cargo run --release -- export-tensors <model> --names a,b [--dtype bf16|f32] -o out.safetensors
 cargo run --release -- job mtp-align <target.gguf> --from <hf-reference> --features <dir> -o runs/<name> [--emit-only]
 cargo run --release -- job run runs/<name>/job.json
@@ -136,7 +142,7 @@ inspect → analyze → plan → surgery → train → evaluate → export
 
 ### Rust workspace (inspection, planning, surgery, UI)
 
-Planned crates:
+Crates:
 
 | Crate | Responsibility |
 |---|---|
@@ -145,8 +151,8 @@ Planned crates:
 | `mb-analyze` ✅ | Static, metadata/provenance, KV-cache, and weight-statistics analyzers. `weights` streams tensors a chunk of rows at a time: moments, kurtosis and channel outliers in the primal basis; zeros and ternary structure in the stored basis; K/V singular-value spectra (`nalgebra`). Activation-aware statistics need calibration data and belong to the Python side. |
 | `mb-fixtures` ✅ | Tiny synthetic checkpoints for tests (Llama GQA, Qwen3.8-like hybrid, DeepSeek MLA+MoE, mixed-quant GGUF). |
 | `mb-features` ✅ | Feature plugin trait, hardware profiles, and the training cost model (`estimate`). Plugins: `fp4-kv`, `kv-share`, `mla`, `mtp`, `draft-head`, `yarn`, `prune-layers`, `moe-upcycle`. `surgery_outline` describes checkpoint changes; executing them belongs to `mb-surgery`. |
-| `mb-plan` ✅ | Recipe parsing (TOML) and plan assembly: detection, compatibility, estimates priced per hardware profile, and a schedule across features (restructure → adapt → frozen). |
-| `mb-surgery` ✅ | Writes new checkpoints with a feature added, streaming from the inputs' mmaps. `mtp::port_mtp_sidecar` ports an HF MTP head into an MTP-only GGUF sidecar for `qwen35` targets, following the PrismML fork's converter; see `docs/research/mtp-port.md` for how it was verified end to end. `export::export_primal` writes selected tensors decoded and un-rotated to safetensors for training. `arch` holds the per-architecture adapters (GGUF ↔ HF names and the converter's transforms); `hf_export` writes a whole GGUF as an HF checkpoint plus a source-quantization manifest; `replace` writes trained tensors back in their original types and basis; `gguf_edit` prunes layers and sets YaRN metadata. |
+| `mb-plan` ✅ | Recipe parsing (TOML) and plan assembly: detection, compatibility, estimates priced per hardware profile, a schedule across features (restructure → adapt → frozen), and the pipeline: the plugins' commands in schedule order, each starting from the model the previous steps produced. |
+| `mb-surgery` ✅ | Writes new checkpoints with a feature added, streaming from the inputs' mmaps. `mtp::port_mtp_sidecar` ports an HF MTP head into an MTP-only GGUF sidecar for `qwen35` targets, following the PrismML fork's converter; see `docs/research/mtp-port.md` for how it was verified end to end. `export::export_primal` writes selected tensors decoded and un-rotated to safetensors for training. `arch` holds the per-architecture adapters (GGUF ↔ HF names and the converter's transforms); `hf_export` writes a whole GGUF as an HF checkpoint plus a source-quantization manifest; `replace` writes trained tensors back in their original types and basis; `gguf_edit` prunes layers and sets YaRN metadata; `upcycle` turns dense MLPs into MoE experts by repeating their stored bytes; `mla` writes an MHA2MLA latent (joint SVD) next to links to an HF checkpoint. |
 | `mb-jobs` ✅ | Job spec and event types (mirroring `schema/`), spec builders (`mtp_align_spec`), and `run`, which launches `python -m modelbuilder_train run` and streams its events. |
 | `mb-api` ✅ | What the dashboards can do, as plain functions and serde types: `inspect`, `stats`, `plan`, `catalog`, `fs::list` (model picker), and `jobs::JobManager` (run a spec with the Python side or follow an events file; cursor-based updates, cancel). With the `ts` feature every type derives `ts_rs::TS`. |
 | `mb-server` ✅ | Local web API (axum) over `mb-api` plus the static web build. Binds loopback and rejects requests whose `Host`/`Origin` isn't localhost (or `--allow-host`), since it reads files and starts processes. Job updates stream as SSE. `types::typescript()` generates `web/src/api/types.ts`. |
@@ -199,12 +205,16 @@ TOML), Jobs (start or follow a job, live curves over SSE).
   (`mtp_align`) from precomputed trunk features, so it never loads the trunk:
   features come from the runtime that serves the model (`features.py`, llama.cpp
   for PrismML GGUFs), frozen tensors from `modelbuilder export-tensors`.
+- `torch`, `draft_align` ✅: Medusa heads and an EAGLE drafter from the same
+  precomputed features (`draft/`).
 - `hf` ✅ (partial): `trunk_distill` loads an `export-hf` checkpoint in
-  transformers and retrains selected tensors against the unmodified weights.
+  transformers and retrains selected tensors against the unmodified weights
+  (or a separate `teacher`, or plain next-token loss).
   A KV-cache fake-quantizer and cross-layer sharing are registered as an
-  attention implementation, and weights are fake-quantized through their
-  source format (`hf/`). One device per process for now; FSDP and PEFT are
-  planned.
+  attention implementation, MLA is switched in by hooks (`hf/mla.py`), and
+  weights are fake-quantized through their source format, optionally as a
+  LoRA update merged inside the parametrization (`hf/`). One device per
+  process for now; FSDP or a model-parallel trunk is planned.
 - `mlx`: Apple Silicon, planned.
 - `backends/torchtitan`: multi-node continued pretraining, planned.
 
@@ -236,6 +246,9 @@ Each feature implements the same contract:
 - `training_stages`: what to train, what to freeze, the losses, and the data.
 - `export_notes`: runtime support implications, e.g. whether llama.cpp or
   vLLM can run the result.
+- `pipeline`: the commands that apply the feature (`{model}`, `{source}`,
+  `{stem}`, `{run}` placeholders), what each produces, and steps with no
+  runner yet. The planner orders and chains them.
 
 First catalog:
 
@@ -287,6 +300,8 @@ group = 2
 - Every estimate lists its assumptions, a `Confidence`, and `references` to
   the paper sections or source files it follows. Token budgets that aren't
   from a source are called heuristics in the assumptions.
+- `pipeline` returns the commands that carry it out, or a `RunStep::missing`
+  with the reason when modelbuilder can't run a stage yet.
 - Test it in `crates/mb-plan/tests/plan.rs` against the fixtures.
 
 ## Hard constraints
