@@ -111,3 +111,35 @@ fn yarn_sets_the_rope_scaling_keys() {
     );
     assert_eq!(cfg["max_position_embeddings"], 4 * orig);
 }
+
+#[test]
+fn kv_share_marks_groups_of_attention_layers() {
+    let dir = tempfile::tempdir().unwrap();
+    let (m, ir) = open(&mb_fixtures::gguf_hybrid_ternary(dir.path()));
+    // 3 DeltaNet + 1 attention, twice: layers 3 and 7 attend; 7 reads 3's cache.
+    let map = mb_surgery::gguf_edit::kv_share_map(&ir, 2);
+    assert_eq!(map, vec![-1, -1, -1, -1, -1, -1, -1, 3]);
+    let out = dir.path().join("s.gguf");
+    assert!(mb_surgery::gguf_edit::set_kv_share(&m, &ir, 1, &out, false).is_err());
+    mb_surgery::gguf_edit::set_kv_share(&m, &ir, 2, &out, false).unwrap();
+    let (s, sir) = open(&out);
+    let v = meta(&sir, "qwen35.attention.kv_reuse_layer")
+        .unwrap()
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        v.iter()
+            .map(|x| match x {
+                MetaValue::I32(i) => i64::from(*i),
+                _ => panic!("{x:?}"),
+            })
+            .collect::<Vec<_>>(),
+        vec![-1, -1, -1, -1, -1, -1, -1, 3]
+    );
+    let t = m.tensor("blk.7.attn_k.weight").unwrap();
+    assert_eq!(
+        m.tensor_bytes(t).unwrap(),
+        s.tensor_bytes(s.tensor("blk.7.attn_k.weight").unwrap())
+            .unwrap()
+    );
+}

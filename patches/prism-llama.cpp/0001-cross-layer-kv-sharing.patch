@@ -1,0 +1,129 @@
+diff --git a/src/llama-arch.cpp b/src/llama-arch.cpp
+index e2d6837..33f1f18 100644
+--- a/src/llama-arch.cpp
++++ b/src/llama-arch.cpp
+@@ -300,6 +300,7 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
+     { LLM_KV_ATTENTION_RELATIVE_BUCKETS_COUNT,       "%s.attention.relative_buckets_count"       },
+     { LLM_KV_ATTENTION_SLIDING_WINDOW,               "%s.attention.sliding_window"               },
+     { LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN,       "%s.attention.sliding_window_pattern"       },
++    { LLM_KV_ATTENTION_KV_REUSE_LAYER,               "%s.attention.kv_reuse_layer"               },
+     { LLM_KV_ATTENTION_ROPE_PATTERN,                 "%s.attention.rope_pattern"                 },
+     { LLM_KV_ATTENTION_VALUE_EXPERT_COUNT,           "%s.attention.value_expert_count"           },
+     { LLM_KV_ATTENTION_VALUE_EXPERT_USED_COUNT,      "%s.attention.value_expert_used_count"      },
+diff --git a/src/llama-arch.h b/src/llama-arch.h
+index 4c761c6..c5fd1cd 100644
+--- a/src/llama-arch.h
++++ b/src/llama-arch.h
+@@ -308,6 +308,7 @@ enum llm_kv {
+     LLM_KV_ATTENTION_RELATIVE_BUCKETS_COUNT,
+     LLM_KV_ATTENTION_SLIDING_WINDOW,
+     LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN,
++    LLM_KV_ATTENTION_KV_REUSE_LAYER,
+     LLM_KV_ATTENTION_SCALE,
+     LLM_KV_ATTENTION_ROPE_PATTERN,
+     LLM_KV_ATTENTION_VALUE_EXPERT_COUNT,
+diff --git a/src/llama-hparams.cpp b/src/llama-hparams.cpp
+index b83f45b..ea1843d 100644
+--- a/src/llama-hparams.cpp
++++ b/src/llama-hparams.cpp
+@@ -318,7 +318,19 @@ uint32_t llama_hparams::n_embd_head_v_mla() const {
+     return is_mla() ? n_embd_head_v_mla_impl : n_embd_head_v();
+ }
+ 
++bool llama_hparams::has_kv_reuse() const {
++    for (uint32_t il = 0; il < n_layer(); ++il) {
++        if (kv_reuse_layer[il] >= 0) {
++            return true;
++        }
++    }
++    return false;
++}
++
+ bool llama_hparams::has_kv(uint32_t il) const {
++    if (il < LLAMA_MAX_LAYERS && kv_reuse_layer[il] >= 0) {
++        return false; // reads the cache of kv_reuse_layer[il]
++    }
+     if (n_layer_kv_from_start >= 0) {
+         if (il < (uint32_t) n_layer_kv_from_start) {
+             return true;
+diff --git a/src/llama-hparams.h b/src/llama-hparams.h
+index c507671..d6ea80b 100644
+--- a/src/llama-hparams.h
++++ b/src/llama-hparams.h
+@@ -85,6 +85,11 @@ struct llama_hparams {
+     // TODO: this needs to be reworked
+     int32_t  n_layer_kv_from_start = -1; // if non-negative, the first n_layer_kv_from_start layers have KV cache
+ 
++    // cross-layer KV sharing (modelbuilder kv-share): for each layer, the earlier layer whose
++    // KV cache it reads instead of writing its own, or -1. Read from %s.attention.kv_reuse_layer.
++    std::array<int32_t, LLAMA_MAX_LAYERS> kv_reuse_layer;
++    bool has_kv_reuse() const;
++
+     // different head size for full_attention and SWA layers
+     uint32_t n_embd_head_k_full; // dimension of keys (d_k). d_q is assumed to be the same, but there are n_head q heads, and only n_head_kv k-v heads
+     uint32_t n_embd_head_v_full; // dimension of values (d_v) aka n_embd_head
+diff --git a/src/llama-memory-hybrid.cpp b/src/llama-memory-hybrid.cpp
+index bbd4bee..82da6e5 100644
+--- a/src/llama-memory-hybrid.cpp
++++ b/src/llama-memory-hybrid.cpp
+@@ -48,7 +48,10 @@ llama_memory_hybrid::llama_memory_hybrid(
+         filter_attn == nullptr ?
+             [&](int32_t il) { return !hparams.is_recr(il); }
+             : filter_attn,
+-        nullptr,
++        // cross-layer KV sharing: a reuse layer reads its producer's cache
++        model.hparams.has_kv_reuse() ?
++            llama_memory_i::layer_reuse_cb([&model](int32_t il) { return model.hparams.kv_reuse_layer[il]; })
++            : llama_memory_i::layer_reuse_cb(nullptr),
+         nullptr
+     )),
+     mem_recr(new llama_memory_recurrent(
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index 14ecc84..c07b9a7 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -1489,6 +1489,16 @@ void llama_model_base::load_hparams(llama_model_loader & ml) {
+     ml.get_key_or_arr(LLM_KV_FEED_FORWARD_LENGTH,  hparams.n_ff_arr,   hparams.n_layer_all, false);
+     ml.get_key_or_arr(LLM_KV_ATTENTION_HEAD_COUNT, hparams.n_head_arr, hparams.n_layer_all, false);
+ 
++    // Cross-layer KV sharing: -1 = the layer keeps its own cache.
++    std::fill(hparams.kv_reuse_layer.begin(), hparams.kv_reuse_layer.end(), -1);
++    ml.get_arr(LLM_KV_ATTENTION_KV_REUSE_LAYER, hparams.kv_reuse_layer, false);
++    for (uint32_t il = 0; il < hparams.n_layer_all; ++il) {
++        const int32_t src = hparams.kv_reuse_layer[il];
++        if (src >= 0 && (src >= (int32_t) il || hparams.kv_reuse_layer[src] >= 0)) {
++            throw std::runtime_error(format("kv_reuse_layer[%u] = %d: must name an earlier layer that keeps its own cache", il, src));
++        }
++    }
++
+     // Populate deepstack_mapping_arr - initialized to -1 (no deepstack)
+     std::fill(hparams.deepstack_mapping_arr.begin(), hparams.deepstack_mapping_arr.end(), -1);
+ 
+@@ -3261,7 +3271,9 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params,
+                     llama_memory_i::layer_reuse_cb reuse = nullptr;
+                     llama_kv_cache::layer_share_cb share = nullptr;
+ 
+-                    if (arch == LLM_ARCH_GEMMA3N || arch == LLM_ARCH_GEMMA4) {
++                    if (hparams.has_kv_reuse()) {
++                        reuse = [&](uint32_t il) { return hparams.kv_reuse_layer[il]; };
++                    } else if (arch == LLM_ARCH_GEMMA3N || arch == LLM_ARCH_GEMMA4) {
+                         reuse = [&](uint32_t il) {
+                             GGML_ASSERT(hparams.n_layer_kv_from_start >= 2);
+ 
+diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
+index 70908c5..856cbd9 100644
+--- a/src/models/qwen35.cpp
++++ b/src/models/qwen35.cpp
+@@ -404,9 +404,11 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn(
+     // Attention computation
+     const float kq_scale = hparams.f_attention_scale == 0.0f ? 1.0f / sqrtf(float(n_embd_head)) : hparams.f_attention_scale;
+ 
++    // cross-layer KV sharing: a reuse layer attends over its producer's cache and writes none
++    const bool reuse_kv = hparams.kv_reuse_layer[il] >= 0;
+     cur = build_attn(inp,
+                 nullptr, nullptr, nullptr,
+-                Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
++                Qcur, reuse_kv ? nullptr : Kcur, reuse_kv ? nullptr : Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+     cb(cur, "attn_pregate", il);
+ 
+     ggml_tensor * gate_sigmoid = ggml_sigmoid(ctx0, gate);

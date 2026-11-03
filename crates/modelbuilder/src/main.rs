@@ -227,6 +227,18 @@ enum SurgeryOp {
         #[arg(long)]
         json: bool,
     },
+    /// Mark cross-layer KV sharing in a GGUF's metadata: groups of `--group`
+    /// full-attention layers read the first one's cache. Train it first
+    /// (`job trunk-distill --kv-share-group`); runs with the patched fork.
+    KvShare {
+        target: PathBuf,
+        #[arg(long)]
+        group: u32,
+        #[arg(long, short = 'o')]
+        out: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
     /// Enable YaRN RoPE scaling in a GGUF's metadata (context × factor).
     Yarn {
         target: PathBuf,
@@ -502,6 +514,21 @@ fn main() -> Result<()> {
                 overwrite: force,
             };
             let report = mb_surgery::upcycle::upcycle(&t, &ir, &opts, &out)?;
+            print!("{}", render::surgery(&report));
+        }
+        Command::Surgery {
+            op:
+                SurgeryOp::KvShare {
+                    target,
+                    group,
+                    out,
+                    force,
+                },
+        } => {
+            let t = mb_formats::open(&target)
+                .with_context(|| format!("opening {}", target.display()))?;
+            let ir = ModelIr::from_raw(t.raw.clone());
+            let report = mb_surgery::gguf_edit::set_kv_share(&t, &ir, group, &out, force)?;
             print!("{}", render::surgery(&report));
         }
         Command::Surgery {

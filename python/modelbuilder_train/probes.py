@@ -257,7 +257,15 @@ class HiddenMatch:
     top1_agreement: float
 
 
-def hf_vs_gguf(server, hf_dir: Path, texts: list[str], max_tokens: int = 512, device: str = "auto") -> HiddenMatch:
+def hf_vs_gguf(
+    server,
+    hf_dir: Path,
+    texts: list[str],
+    max_tokens: int = 512,
+    device: str = "auto",
+    dtype: str = "float32",
+    kv_share_group: int | None = None,
+) -> HiddenMatch:
     """Checks an HF export against the GGUF it came from, token for token.
 
     ``server`` runs the GGUF with ``--embeddings --pooling none`` (see
@@ -265,7 +273,12 @@ def hf_vs_gguf(server, hf_dir: Path, texts: list[str], max_tokens: int = 512, de
     hidden state per token. The same token ids go through the HF model; both
     hidden states are also pushed through the HF LM head to compare argmaxes.
     Use a pruned GGUF (``modelbuilder surgery prune``) to check a big model on
-    a small machine.
+    a small machine, and ``dtype="bfloat16"`` to halve the HF model's memory
+    (a large vocabulary's embedding and head dominate it); the comparison is
+    still in float32, at bf16 precision. With ``kv_share_group`` the HF model
+    shares K/V across groups of attention layers as ``trunk_distill`` trains it,
+    to check a GGUF marked by ``modelbuilder surgery kv-share`` in a runtime
+    that implements the sharing.
     """
     import torch
     from transformers import AutoModelForCausalLM
@@ -273,7 +286,19 @@ def hf_vs_gguf(server, hf_dir: Path, texts: list[str], max_tokens: int = 512, de
     from modelbuilder_train.mtp.train import pick_device
 
     dev = pick_device(device)
-    model = AutoModelForCausalLM.from_pretrained(hf_dir, dtype=torch.float32).to(dev).eval()
+    behavior = None
+    if kv_share_group:
+        from modelbuilder_train.hf import attention
+
+        attention.register()
+        model = AutoModelForCausalLM.from_pretrained(
+            hf_dir, dtype=getattr(torch, dtype), attn_implementation=attention.NAME
+        ).to(dev)
+        behavior = attention.CacheBehavior()
+        behavior.share = attention.share_groups(attention.attach(model, behavior), kv_share_group)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(hf_dir, dtype=getattr(torch, dtype)).to(dev)
+    model.eval()
     head = model.get_output_embeddings()
     cos_all, err, norm, agree, n = [], 0.0, 0.0, 0, 0
     with torch.no_grad():
@@ -282,11 +307,14 @@ def hf_vs_gguf(server, hf_dir: Path, texts: list[str], max_tokens: int = 512, de
             if len(ids) < 2:
                 continue
             ref = server.hidden_states(ids).to(dev)
+            if behavior is not None:
+                behavior.reset()
             got = model.get_decoder()(input_ids=torch.tensor([ids], device=dev)).last_hidden_state[0].float()
             cos_all.append(torch.nn.functional.cosine_similarity(got, ref, dim=-1))
             err += float((got - ref).pow(2).sum())
             norm += float(ref.pow(2).sum())
-            agree += int((head(got).argmax(-1) == head(ref).argmax(-1)).sum())
+            hd = head.weight.dtype
+            agree += int((head(got.to(hd)).argmax(-1) == head(ref.to(hd)).argmax(-1)).sum())
             n += len(ids)
     if not n:
         raise ValueError("no text with at least 2 tokens")

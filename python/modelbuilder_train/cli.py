@@ -134,7 +134,10 @@ def cmd_probe(args: argparse.Namespace) -> int:
             Path(args.llama_bin), Path(args.model), port=args.port, embeddings=True, ctx=args.ctx,
             threads=args.threads, gpu_layers=args.gpu_layers,
         ) as s:  # fmt: skip
-            r = probes.hf_vs_gguf(s, Path(args.hf), texts, max_tokens=args.ctx, device=args.device)
+            r = probes.hf_vs_gguf(
+                s, Path(args.hf), texts, max_tokens=args.ctx, device=args.device, dtype=args.dtype,
+                kv_share_group=args.kv_share_group,
+            )  # fmt: skip
         report = asdict(r)
         print(
             f"{r.tokens} tokens: cosine mean {r.cosine_mean:.6f} (min {r.cosine_min:.6f}), "
@@ -452,6 +455,8 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--hf", required=True, help="HF directory from `modelbuilder export-hf`")
     q.add_argument("--texts", required=True, help="JSONL with a `text` per line")
     q.add_argument("--device", default="auto")
+    q.add_argument("--dtype", default="float32", choices=["float32", "bfloat16"], help="HF model weights in memory")
+    q.add_argument("--kv-share-group", type=int, help="share K/V across groups of attention layers in the HF model")
     q.add_argument("--port", type=int, default=8094)
     probe_common(q)
     q = psub.add_parser("skills", help="a short auto-graded suite: code, reasoning, tool use, languages")

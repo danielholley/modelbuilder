@@ -279,6 +279,94 @@ pub fn set_yarn(
     })
 }
 
+/// The cross-layer KV-sharing map: groups of `group` consecutive full-attention
+/// layers (in layer order; layers with a sliding window or recurrent mixers are
+/// skipped), the first of each group keeping its cache and the others reading
+/// it. The same grouping as the training side (`hf/attention.py`,
+/// `share_groups`). Returns, per layer, the producer layer or -1.
+pub fn kv_share_map(ir: &ModelIr, group: u32) -> Vec<i32> {
+    let attn: Vec<u32> = ir
+        .layers
+        .iter()
+        .filter(|l| matches!(&l.mixer, mb_ir::Mixer::Attention(a) if a.sliding_window.is_none()))
+        .map(|l| l.index)
+        .collect();
+    let mut map = vec![-1i32; ir.layers.len()];
+    for g in attn.chunks(group.max(1) as usize) {
+        for &l in &g[1..] {
+            map[l as usize] = g[0] as i32;
+        }
+    }
+    map
+}
+
+/// Writes `{arch}.attention.kv_reuse_layer` (see [`kv_share_map`]) so a
+/// runtime with cross-layer KV sharing (the patch in
+/// `patches/prism-llama.cpp/`) gives reuse layers no cache of their own.
+/// Tensors are copied byte for byte; train the sharing first
+/// (`job trunk-distill --kv-share-group`), or quality drops.
+pub fn set_kv_share(
+    model: &LoadedModel,
+    ir: &ModelIr,
+    group: u32,
+    out: &Path,
+    overwrite: bool,
+) -> Result<SurgeryReport, SurgeryError> {
+    let (mut kv, arch) = gguf_kv(ir)?;
+    check_output(ir, out, overwrite)?;
+    if group < 2 {
+        return Err(SurgeryError::Incompatible(
+            "group must be at least 2".into(),
+        ));
+    }
+    let map = kv_share_map(ir, group);
+    let reused = map.iter().filter(|&&p| p >= 0).count();
+    if reused == 0 {
+        return Err(SurgeryError::Incompatible(
+            "fewer than two full-attention layers: nothing to share".into(),
+        ));
+    }
+    let key = format!("{arch}.attention.kv_reuse_layer");
+    set(
+        &mut kv,
+        &key,
+        MetaValue::Array {
+            elem: mb_ir::MetaType::I32,
+            values: map.iter().map(|&p| MetaValue::I32(p)).collect(),
+        },
+    );
+    let tensors: Vec<TensorToWrite> = ir
+        .raw
+        .tensors
+        .iter()
+        .map(|t| {
+            Ok(TensorToWrite {
+                name: t.name.clone(),
+                dtype: t.dtype,
+                shape: t.shape.clone(),
+                data: Cow::Borrowed(model.tensor_bytes(t)?),
+            })
+        })
+        .collect::<Result<_, SurgeryError>>()?;
+    gguf::write(out, &kv, &tensors)?;
+    let pairs: Vec<String> = map
+        .iter()
+        .enumerate()
+        .filter(|(_, &p)| p >= 0)
+        .map(|(l, p)| format!("{l}→{p}"))
+        .collect();
+    Ok(SurgeryReport {
+        output: out.to_owned(),
+        bytes: file_len(out)?,
+        tensors: vec![],
+        metadata: vec![format!("{key}: {}", pairs.join(", "))],
+        notes: vec![
+            format!("{reused} attention layers read an earlier layer's KV cache instead of keeping their own."),
+            "Needs a runtime with cross-layer KV sharing (patches/prism-llama.cpp/); others ignore the key and run the model unshared.".into(),
+        ],
+    })
+}
+
 pub(crate) fn file_len(p: &Path) -> Result<u64, SurgeryError> {
     Ok(std::fs::metadata(p)
         .map_err(|e| SurgeryError::Output(e.to_string()))?

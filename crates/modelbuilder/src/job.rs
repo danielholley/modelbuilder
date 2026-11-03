@@ -670,8 +670,24 @@ fn trunk_distill(a: TrunkDistillArgs) -> Result<()> {
         overwrite: a.force,
         max_rel_error: Some(a.max_rel_error),
     };
-    let report = mb_surgery::replace::replace_tensors(&target, &target_ir, &u, &new, &opts)?;
+    let Some(group) = a.kv_share_group else {
+        let report = mb_surgery::replace::replace_tensors(&target, &target_ir, &u, &new, &opts)?;
+        print!("\n{}", render::surgery(&report));
+        return Ok(());
+    };
+    // Trained for a shared cache: also mark the sharing for runtimes that implement it.
+    let tmp = out.join(".replaced.gguf");
+    let opts = mb_surgery::replace::ReplaceOptions {
+        overwrite: true,
+        ..opts
+    };
+    let report = mb_surgery::replace::replace_tensors(&target, &target_ir, &u, &tmp, &opts)?;
     print!("\n{}", render::surgery(&report));
+    let (m, ir) = open(&tmp)?;
+    let shared = mb_surgery::gguf_edit::set_kv_share(&m, &ir, group, &new, a.force)?;
+    drop(m);
+    std::fs::remove_file(&tmp)?;
+    print!("\n{}", render::surgery(&shared));
     Ok(())
 }
 
