@@ -162,7 +162,7 @@ impl Feature for Mla {
             },
             assumptions: vec![
                 format!("Cache after conversion: {per_layer_after} values per token and layer (kv_rank {} + KV heads × rope_dim {}).", p.kv_rank, p.rope_dim),
-                "Init: MHA2MLA's data-free partial RoPE (highest frequencies) and joint SVD; its best variant picks RoPE dimensions by query/key norms on calibration data, which isn't implemented.".into(),
+                "Init: MHA2MLA's partial RoPE and joint SVD. The default keeps the highest frequencies (data-free); `modelbuilder_train mla-rope-scores` ranks them by query/key norms on calibration text (the paper's best variant, here one choice shared by every head and layer) for `--freqs`.".into(),
                 "Trainable: the attention tensors of converted layers; the MLPs stay frozen.".into(),
                 "The token budget is a heuristic; MHA2MLA reports recovery with a small fraction of the original pretraining data on models up to 7B.".into(),
                 "Low-bit sources: the new projections are initialized in the primal basis, then rotated (if the source is rotated) and quantized to the source format.".into(),

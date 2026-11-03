@@ -52,7 +52,10 @@ speculative decoding and **DeepSeek-V4.1-Flash-style KV cache changes**.
   on `k_proj`/`v_proj` and the rotary embedding (`hf/mla.py`), so Q/K norms,
   gating and partial-rotary models work unchanged. Exact at full rank on
   llama, qwen2 (biases), qwen3 (Q/K norms) and a Qwen3.5 hybrid (partial
-  RoPE); `job trunk-distill --mla-rank` converts and trains in one go. The
+  RoPE); `job trunk-distill --mla-rank` converts and trains in one go.
+  `modelbuilder_train mla-rope-scores` ranks RoPE frequencies by query/key
+  norms on calibration text (MHA2MLA's S_2-norm, one choice for all heads
+  since they share a rotary table) for `surgery mla --freqs`. The
   `mla` plugin now counts RoPE dims per KV head, as MHA2MLA does.
 - **The `draft_align` stage**: Medusa heads (zero-initialized residual
   blocks, own or shared LM head, 0.8^k weighting) and an EAGLE drafter (fc
@@ -124,7 +127,7 @@ python -m modelbuilder_train generate-corpus | extract-features | run | validate
 
 ### Test coverage
 
-106 Rust tests, 78 Python tests (including end-to-end runs through the Rust
+106 Rust tests, 79 Python tests (including end-to-end runs through the Rust
 binary on fixtures: MTP alignment, KV QAT, MLA recovery, healing a pruned
 model against its original, LoRA write-back, draft heads) and 7 web tests,
 all in CI. Every test uses tiny synthetic checkpoints; nothing downloads a
@@ -152,8 +155,6 @@ These need hardware, data or runtime code that isn't in this repository:
   `qwen35moe` needs the shared-expert layout checked against the loader.
 - **DSpark drafters**: the paper describes the drafter but there is no
   public reference code to follow.
-- **MLA RoPE-dimension choice by query/key norms** (MHA2MLA's best variant)
-  needs calibration activations; only the data-free choices exist.
 - **Backends**: `mlx` runs `mtp_align` only (other stages use torch on MPS),
   and there is no multi-node pretraining backend (`torchtitan`), which
   continued pretraining at upcycling scale needs. The `hf` stage spreads a trunk over

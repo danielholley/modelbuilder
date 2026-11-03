@@ -216,6 +216,10 @@ enum SurgeryOp {
         /// Which RoPE frequencies to keep: high or uniform.
         #[arg(long, default_value = "high")]
         select: String,
+        /// Keep exactly these frequency indices (e.g. from
+        /// `modelbuilder_train mla-rope-scores`); overrides --select.
+        #[arg(long, value_delimiter = ',')]
+        freqs: Option<Vec<usize>>,
         #[arg(long, short = 'o')]
         out: PathBuf,
         #[arg(long)]
@@ -453,6 +457,7 @@ fn main() -> Result<()> {
                     kv_rank,
                     rope_dim,
                     select,
+                    freqs,
                     out,
                     force,
                     json,
@@ -464,6 +469,7 @@ fn main() -> Result<()> {
                 kv_rank,
                 rope_dim,
                 select: select.parse().map_err(anyhow::Error::msg)?,
+                freqs,
                 overwrite: force,
             };
             let report = mb_surgery::mla::convert(&m, &source, &opts, &out)?;

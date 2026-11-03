@@ -1,6 +1,7 @@
 """``modelbuilder surgery mla`` and the MLA student path: exact at full rank, trainable when truncated."""
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -143,3 +144,57 @@ def test_mla_recover_job_trains_the_latent(tmp_path: Path) -> None:
     with safe_open(str(run / "updates" / "model.safetensors"), "pt") as f:
         keys = list(f.keys())
     assert keys and all(".self_attn.mla." in k for k in keys)
+
+
+def test_rope_scores_find_the_frequencies_attention_uses(tmp_path: Path) -> None:
+    pytest.importorskip("transformers")
+    import transformers as t
+
+    from modelbuilder_train.hf.mla import rope_scores
+
+    torch.manual_seed(0)
+    model = t.LlamaForCausalLM(t.LlamaConfig(**COMMON)).float()
+    hd, rot = 8, 8
+    with torch.no_grad():  # make frequency pair 2 dominate Q and K in every head
+        for layer in model.model.layers:
+            for proj, heads in [(layer.self_attn.q_proj, 4), (layer.self_attn.k_proj, 2)]:
+                for h in range(heads):
+                    for d in (2, 2 + rot // 2):
+                        proj.weight[h * hd + d] *= 20
+    src = tmp_path / "src"
+    model.save_pretrained(src)
+    scores = rope_scores(src, [list(range(3, 30))])
+    assert len(scores) == rot // 2
+    assert max(range(len(scores)), key=scores.__getitem__) == 2
+
+    texts = tmp_path / "t.jsonl"
+    texts.write_text(json.dumps({"tokens": list(range(3, 30))}) + "\n")
+    out = subprocess.run(
+        [sys.executable, "-m", "modelbuilder_train", "mla-rope-scores", "--hf", str(src), "--texts", str(texts),
+         "--rope-dim", "4", "--out", str(tmp_path / "s.json")],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()  # fmt: skip
+    freqs = [int(x) for x in out.split(",")]
+    assert 2 in freqs and len(freqs) == 2
+    report = json.loads(
+        mb(
+            "surgery",
+            "mla",
+            str(src),
+            "--kv-rank",
+            "8",
+            "--rope-dim",
+            "4",
+            "--freqs",
+            out,
+            "-o",
+            str(tmp_path / "m"),
+            "--json",
+        )  # fmt: skip
+    )
+    assert report["rope_freqs"] == freqs
+    cfg = json.loads((tmp_path / "m" / "config.json").read_text())["modelbuilder_mla"]
+    assert cfg["rope_select"] == "given" and cfg["rope_freqs"] == freqs
+    bad = mb("surgery", "mla", str(src), "--kv-rank", "8", "--rope-dim", "4", "--freqs", "1,9", "-o",
+             str(tmp_path / "b"), check=False)  # fmt: skip
+    assert "distinct indices" in bad

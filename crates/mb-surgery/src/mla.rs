@@ -47,6 +47,9 @@ pub enum RopeSelect {
     High,
     /// Pairs spaced evenly over the spectrum (S_uniform).
     Uniform,
+    /// Pairs given explicitly, e.g. ranked by query/key norms on calibration
+    /// text (S_2-norm, `modelbuilder_train mla-rope-scores`).
+    Given,
 }
 
 impl std::str::FromStr for RopeSelect {
@@ -66,6 +69,8 @@ pub struct MlaOptions {
     /// RoPE dimensions kept per KV head (even).
     pub rope_dim: usize,
     pub select: RopeSelect,
+    /// Frequency indices to keep (overrides `select`).
+    pub freqs: Option<Vec<usize>>,
     pub overwrite: bool,
 }
 
@@ -101,7 +106,9 @@ pub fn select_freqs(half: usize, keep: usize, select: RopeSelect) -> Vec<usize> 
     match select {
         // inv_freq[i] = base^(-2i/rotary_dim) falls with i: the first pairs rotate fastest.
         RopeSelect::High => (0..keep).collect(),
-        RopeSelect::Uniform => (0..keep).map(|j| j * half / keep.max(1)).collect(),
+        RopeSelect::Uniform | RopeSelect::Given => {
+            (0..keep).map(|j| j * half / keep.max(1)).collect()
+        }
     }
 }
 
@@ -278,7 +285,22 @@ pub fn convert(
         ));
     }
 
-    let freqs = select_freqs(rot / 2, r / 2, opts.select);
+    let (freqs, select) = match &opts.freqs {
+        Some(f) => {
+            let mut f = f.clone();
+            f.sort_unstable();
+            f.dedup();
+            if f.len() != r / 2 || f.iter().any(|&i| i >= rot / 2) {
+                return Err(SurgeryError::Incompatible(format!(
+                    "freqs must be {} distinct indices below {} (rope_dim {r} / 2, rotary dim {rot} / 2)",
+                    r / 2,
+                    rot / 2
+                )));
+            }
+            (f, RopeSelect::Given)
+        }
+        None => (select_freqs(rot / 2, r / 2, opts.select), opts.select),
+    };
     let mut rope_dims: Vec<usize> = freqs.iter().flat_map(|&i| [i, i + rot / 2]).collect();
     rope_dims.sort_unstable();
     let nope_dims: Vec<usize> = (0..hd).filter(|d| !rope_dims.contains(d)).collect();
@@ -407,7 +429,7 @@ pub fn convert(
         "layers": layers.iter().map(|(i, _)| i).collect::<Vec<_>>(),
         "kv_rank": opts.kv_rank,
         "rope_dim": r,
-        "rope_select": opts.select,
+        "rope_select": select,
         "rotary_dim": rot,
         "head_dim": hd,
         "num_key_value_heads": n_kv,
@@ -449,7 +471,7 @@ pub fn convert(
                 before as f64 / after as f64
             ),
             format!("Lowest K/V energy kept by the rank-{} factorization: {:.2}%.", opts.kv_rank, 100.0 * worst),
-            format!("RoPE kept on {r} of {rot} rotary dimensions per head ({:?} selection); the rest lose RoPE in Q and K.", opts.select),
+            format!("RoPE kept on {r} of {rot} rotary dimensions per head ({select:?} selection); the rest lose RoPE in Q and K."),
             "Original weights are linked, not copied: they are the teacher for recovery training (`trunk_distill` with trainable `self_attn.mla.`).".into(),
             "No runtime runs this layout yet: llama.cpp and vLLM run MLA only in DeepSeek's architecture.".into(),
         ],

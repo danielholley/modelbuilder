@@ -127,6 +127,9 @@ pub struct TrunkDistillArgs {
     /// With `--mla-rank`: which RoPE frequencies to keep (high or uniform).
     #[arg(long, default_value = "high")]
     mla_select: String,
+    /// With `--mla-rank`: keep exactly these RoPE frequency indices.
+    #[arg(long, value_delimiter = ',')]
+    mla_freqs: Option<Vec<usize>>,
     /// Distill from this model instead of the target itself (a GGUF, exported
     /// with the same --reference, or an HF directory), e.g. the unpruned
     /// original when healing a pruned model.
@@ -531,6 +534,7 @@ fn trunk_distill(a: TrunkDistillArgs) -> Result<()> {
                 kv_rank,
                 rope_dim: a.mla_rope_dim,
                 select: a.mla_select.parse().map_err(anyhow::Error::msg)?,
+                freqs: a.mla_freqs.clone(),
                 overwrite: true,
             };
             let report = mb_surgery::mla::convert(&m, &hf, &opts, &out.join("mla"))?;

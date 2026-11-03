@@ -136,3 +136,52 @@ def attach(model: nn.Module, model_dir: Path, cfg: dict, mode: _Mode) -> list[st
 
     _rotary(model).register_forward_hook(rope_hook)
     return names
+
+
+def rope_scores(model_dir: Path, sequences: list[list[int]], device: str = "cpu") -> list[float]:
+    """How much each RoPE frequency pair contributes to attention, for choosing which to keep.
+
+    MHA2MLA's S_2-norm (arXiv 2502.14837, §3.1): for frequency pair ``i``,
+    ``E[‖q_i‖]·E[‖k_i‖]`` over tokens, per query head and its KV head. A 2D
+    rotation keeps each pair's norm, so the post-RoPE Q/K that the attention
+    function receives give the same norms as before RoPE, for any model.
+    Scores are summed over heads and layers, since every layer shares one
+    rotary table here. Pass the top ``rope_dim / 2`` to
+    ``modelbuilder surgery mla --freqs``.
+    """
+    from transformers import AttentionInterface, AutoModelForCausalLM
+    from transformers.integrations.sdpa_attention import sdpa_attention_forward
+
+    cfg = json.loads((Path(model_dir) / "config.json").read_text())
+    t = cfg.get("text_config", cfg)
+    hd = t.get("head_dim") or t["hidden_size"] // t["num_attention_heads"]
+    rope = t.get("rope_parameters") or t.get("rope_scaling") or {}
+    rot = int(hd * t.get("partial_rotary_factor", rope.get("partial_rotary_factor", 1.0)))
+    half = rot // 2
+    sums: dict[int, list] = {}
+
+    def capture(module, query, key, value, attention_mask, **kw):
+        def pair_norms(x: torch.Tensor) -> torch.Tensor:  # [b, heads, t, d] -> [heads, half], summed over tokens
+            x = x.float()
+            return (x[..., :half] ** 2 + x[..., half:rot] ** 2).sqrt().sum(dim=(0, 2))
+
+        s = sums.setdefault(module.layer_idx, [0, 0, 0])
+        s[0] = s[0] + pair_norms(query)
+        s[1] = s[1] + pair_norms(key)
+        s[2] += query.shape[0] * query.shape[2]
+        return sdpa_attention_forward(module, query, key, value, attention_mask, **kw)
+
+    AttentionInterface.register("modelbuilder_rope_scores", capture)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_dir, dtype=torch.float32, attn_implementation="modelbuilder_rope_scores"
+    ).to(device)
+    model.eval()
+    with torch.no_grad():
+        for seq in sequences:
+            model(torch.tensor(seq, device=device)[None])
+    total = torch.zeros(half)
+    for q, k, n in sums.values():
+        q, k = q.cpu() / n, k.cpu() / n
+        rep = q.shape[0] // k.shape[0]
+        total += (q * k.repeat_interleave(rep, dim=0)).sum(0)
+    return total.tolist()

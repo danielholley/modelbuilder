@@ -179,6 +179,19 @@ def cmd_probe(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mla_scores(args: argparse.Namespace) -> int:
+    from modelbuilder_train.hf.distill import load_sequences
+    from modelbuilder_train.hf.mla import rope_scores
+
+    seqs = [s[: args.max_tokens] for s in load_sequences(Path(args.texts), Path(args.hf)) if len(s) >= 2]
+    scores = rope_scores(Path(args.hf), seqs, device=args.device)
+    keep = sorted(sorted(range(len(scores)), key=lambda i: -scores[i])[: args.rope_dim // 2])
+    print(",".join(map(str, keep)))
+    if args.out:
+        Path(args.out).write_text(json.dumps({"scores": scores, "freqs": keep}, indent=2) + "\n")
+    return 0
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
     spec = JobSpec.load(args.spec)
     print(f"ok: {spec.job_id}, {len(spec.stages)} stage(s)")
@@ -377,6 +390,15 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--no-baseline", action="store_true", help="skip the plain (no drafting) runs")
     b.add_argument("--out", help="write all results as JSON")
     b.set_defaults(fn=cmd_bench)
+
+    ms = sub.add_parser("mla-rope-scores", help="rank RoPE frequencies by query/key norms (MHA2MLA S_2-norm)")
+    ms.add_argument("--hf", required=True, help="HF model directory (e.g. from modelbuilder export-hf)")
+    ms.add_argument("--texts", required=True, help='JSONL with {"text": ...} or {"tokens": [...]} per line')
+    ms.add_argument("--rope-dim", type=int, required=True, help="RoPE dims to keep per KV head (top rope-dim/2 pairs)")
+    ms.add_argument("--max-tokens", type=int, default=2048, help="per text")
+    ms.add_argument("--device", default="cpu")
+    ms.add_argument("--out", help="write scores and the chosen frequencies as JSON")
+    ms.set_defaults(fn=cmd_mla_scores)
 
     pr = sub.add_parser("probe", help="measure quality: perplexity, long-context retrieval, KV cache types")
     psub = pr.add_subparsers(dest="probe", required=True)

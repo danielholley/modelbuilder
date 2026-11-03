@@ -95,6 +95,7 @@ python -m venv python/.venv && python/.venv/bin/pip install -e "python[torch,dev
 cd python && .venv/bin/ruff check . && .venv/bin/ruff format --check . && .venv/bin/pytest -q
 python -m modelbuilder_train extract-features --llama-bin <fork>/build/bin --model <target.gguf> --texts texts.jsonl --out <dir>
 python -m modelbuilder_train probe perplexity|needle|kv-cache|hf-vs-gguf|skills ...
+python -m modelbuilder_train mla-rope-scores --hf <hf-dir> --texts t.jsonl --rope-dim 32   # → surgery mla --freqs
 ```
 
 To inspect a real multi-GB model without downloading it, fetch only the
