@@ -231,7 +231,15 @@ fn file_stem(p: &str) -> String {
 pub fn pipeline(ctx: &Context, features: &[FeaturePlan]) -> Result<Pipeline, PlanError> {
     let mut steps: Vec<(&str, mb_features::RunStep)> = Vec::new();
     for f in features.iter().filter(|f| f.compat.ok()) {
-        for st in feature(f.id)?.pipeline(ctx, &f.params)? {
+        for mut st in feature(f.id)?.pipeline(ctx, &f.params)? {
+            // A step that trains a stage runs where the schedule puts that stage.
+            if let Some(s) = st.stage.as_deref().and_then(|name| {
+                f.estimate
+                    .as_ref()
+                    .and_then(|e| e.stages.iter().find(|s| s.name == name))
+            }) {
+                st.trunk = s.trunk;
+            }
             steps.push((f.id, st));
         }
     }

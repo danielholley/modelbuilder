@@ -64,7 +64,11 @@ fn shows_a_model_its_tensors_and_plan() {
     settle(&mut app);
     key(&mut app, KeyCode::Char('3'));
     let s = screen(&mut app);
-    assert!(s.contains("kv-share") && s.contains("1x24GB"), "{s}");
+    assert!(s.contains("fp4-kv") && s.contains("1x24GB"), "{s}");
+    assert!(
+        s.contains("Pipeline") && s.contains("modelbuilder job trunk-distill"),
+        "{s}"
+    );
 
     key(&mut app, KeyCode::Tab);
     assert_eq!(app.tab, Tab::Job);

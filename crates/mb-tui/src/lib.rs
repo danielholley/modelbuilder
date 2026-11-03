@@ -566,6 +566,23 @@ impl App {
             }
             lines.push(Line::raw(""));
         }
+        if !plan.pipeline.steps.is_empty() {
+            lines.push(Line::from("Pipeline (commands, in order)").bold());
+            for st in &plan.pipeline.steps {
+                let stage = st
+                    .stage
+                    .as_deref()
+                    .map_or(String::new(), |s| format!(" [{s}]"));
+                lines.push(Line::from(vec![
+                    Span::raw(format!("  {}. {}{stage}  ", st.order, st.feature)),
+                    match &st.command {
+                        Some(c) => Span::styled(c.clone(), Style::new().fg(MUTED)),
+                        None => Span::styled("! no runner yet", Style::new().fg(WARNING)),
+                    },
+                ]));
+            }
+            lines.push(Line::raw(""));
+        }
         for fp in &plan.features {
             let (tone, label) = if !fp.compat.blockers.is_empty() {
                 (CRITICAL, "✕ blocked")

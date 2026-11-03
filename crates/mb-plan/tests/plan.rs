@@ -305,6 +305,25 @@ fn pipeline_chains_models_in_schedule_order() {
         .iter()
         .all(|s| s.command.as_ref().is_none_or(|c| !c.contains("{"))));
 
+    // Steps that train a stage run in the schedule's order of stages.
+    let p = plan(
+        &ctx,
+        &[
+            parse_feature_spec("yarn:finetune=true"),
+            parse_feature_spec("prune-layers"),
+        ],
+        &hw,
+    )
+    .unwrap();
+    let staged: Vec<&str> = p
+        .pipeline
+        .steps
+        .iter()
+        .filter_map(|s| s.stage.as_deref())
+        .collect();
+    let scheduled: Vec<&str> = p.schedule.stages.iter().map(|s| s.stage.as_str()).collect();
+    assert_eq!(staged, scheduled);
+
     // A step with no runner is listed, and the plan says so.
     let p = plan(&ctx, &[parse_feature_spec("moe-upcycle")], &hw).unwrap();
     assert!(p.pipeline.steps.iter().any(|s| s.command.is_none()));
