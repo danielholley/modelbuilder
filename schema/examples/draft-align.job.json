@@ -20,6 +20,10 @@
         "embedding_tensor": "token_embd.weight",
         "lm_head_tensor": "output.weight",
         "features": "runs/features/target",
+        "block_size": 7,
+        "markov_rank": 256,
+        "num_anchors": 512,
+        "confidence_head": true,
         "eval_fraction": 0.05
       },
       "hyper": {

@@ -324,8 +324,14 @@ fn pipeline_chains_models_in_schedule_order() {
     let scheduled: Vec<&str> = p.schedule.stages.iter().map(|s| s.stage.as_str()).collect();
     assert_eq!(staged, scheduled);
 
-    // A step with no runner is listed, and the plan says so.
-    let p = plan(&ctx, &[parse_feature_spec("draft-head:kind=dspark")], &hw).unwrap();
-    assert!(p.pipeline.steps.iter().any(|s| s.command.is_none()));
-    assert!(p.pipeline.notes.iter().any(|n| n.contains("No runner")));
+    // Every compatible feature of the default catalog has a runner on this model.
+    let p = plan(&ctx, &[], &hw).unwrap();
+    let missing: Vec<_> = p
+        .pipeline
+        .steps
+        .iter()
+        .filter(|s| s.command.is_none())
+        .map(|s| (&s.feature, &s.stage))
+        .collect();
+    assert!(missing.is_empty(), "{missing:?}");
 }

@@ -78,6 +78,7 @@ cargo run --release -- surgery mla <hf-dir> --kv-rank 512 --rope-dim 32 -o <mla-
 cargo run --release -- job trunk-distill <model.gguf> --reference <hf-dir> --texts t.jsonl --kv-format q4_0 -o runs/<name>
 #   also: --kv-share-group N | --mla-rank R | --teacher <orig.gguf> | --loss ce | --lora-rank r | --trainable a,b
 cargo run --release -- job draft-align <target.gguf> --kind medusa|eagle --features <dir> [--reference <hf-dir>] -o runs/<name>
+cargo run --release -- job draft-align <target.gguf> --kind dspark --reference <hf-dir> --texts t.jsonl -o runs/<name>
 cargo run --release -- export-tensors <model> --names a,b [--dtype bf16|f32] -o out.safetensors
 cargo run --release -- job mtp-align <target.gguf> --from <hf-reference> --features <dir> -o runs/<name> [--emit-only]
 cargo run --release -- job run runs/<name>/job.json
@@ -207,7 +208,8 @@ TOML), Jobs (start or follow a job, live curves over SSE).
   features come from the runtime that serves the model (`features.py`, llama.cpp
   for PrismML GGUFs), frozen tensors from `modelbuilder export-tensors`.
 - `torch`, `draft_align` ✅: Medusa heads and an EAGLE drafter from the same
-  precomputed features (`draft/`).
+  precomputed features, and DSpark drafters (DeepSpec semantics) with the
+  target online (`draft/`).
 - `hf` ✅ (partial): `trunk_distill` loads an `export-hf` checkpoint in
   transformers and retrains selected tensors against the unmodified weights
   (or a separate `teacher`, or plain next-token loss).

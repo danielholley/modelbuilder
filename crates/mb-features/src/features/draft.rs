@@ -9,12 +9,18 @@
 //!   next token's embedding (2h → h), one decoder layer follows, and the
 //!   target's frozen LM head produces the draft. EAGLE-3 (arXiv 2503.01840)
 //!   fuses low, middle and high-layer features instead.
-//! - **DSpark** (DeepSeek-V4.1-Flash, arXiv 2609.19969): a 3-block drafter
-//!   with a 128-token sliding window that drafts 5 positions per pass with a
-//!   Markov head and a confidence head, trained with the backbone frozen.
+//! - **DSpark** (DeepSeek-V4.1-Flash, arXiv 2609.19969; reference trainer:
+//!   DeepSeek's DeepSpec, `deepspec/modeling/dspark/`): a non-causal block
+//!   drafter. Hidden states tapped from five target layers are the keys and
+//!   values; a block of `[anchor, MASK, ...]` drafts `block_size` (7) tokens
+//!   per pass through decoder layers of the target's shape (5), plus a
+//!   low-rank Markov head on the previous token and a confidence head. Loss:
+//!   0.1·CE + 0.9·L1 to the target's distribution + confidence BCE, decayed
+//!   over block positions.
 //!
-//! All three learn from the trunk's features, so the features can be
-//! precomputed once in the serving runtime, as for `mtp`.
+//! Medusa and EAGLE learn from the trunk's final features, which can be
+//! precomputed once in the serving runtime, as for `mtp`; DSpark taps several
+//! layers, so it runs the target online.
 
 use serde::Deserialize;
 
@@ -42,7 +48,7 @@ enum Kind {
 #[serde(deny_unknown_fields, default)]
 struct P {
     kind: Kind,
-    /// Medusa: number of heads (default 4). EAGLE/DSpark: decoder blocks (default 1 / 3).
+    /// Medusa: number of heads (default 4). EAGLE/DSpark: decoder layers (default 1 / 5).
     size: Option<u32>,
 }
 
@@ -91,13 +97,13 @@ fn shape(ctx: &Context, p: &P) -> Shape {
             }
         }
         Kind::Dspark => {
-            let n = u64::from(p.size.unwrap_or(3));
+            let n = u64::from(p.size.unwrap_or(5));
             Shape {
-                // The confidence and Markov heads are small next to the blocks.
-                trainable: 2 * h * h + n * block_params(ctx) + h,
+                // fc over 5 taps, the decoder layers, a rank-256 Markov head and the confidence head.
+                trainable: 5 * h * h + n * block_params(ctx) + 2 * v * 256 + h + 257,
                 shared_head: true,
                 what: format!(
-                    "DSpark drafter: {n} sliding-window blocks, 5 draft positions per pass"
+                    "DSpark drafter: {n} decoder layers over 5 target taps, 7 draft positions per pass"
                 ),
             }
         }
@@ -145,7 +151,7 @@ impl Feature for DraftHead {
             c.blockers.push("size must be at least 1".into());
         }
         if p.kind == Kind::Dspark {
-            c.warnings.push("DSpark's modules are described in the paper but no reference code or runtime is public; the drafter would need custom inference support".into());
+            c.warnings.push("DSpark runs the target online in PyTorch during training (it taps several layers), so the trunk must fit in memory; the PrismML llama.cpp fork runs the result (`--spec-type draft-dspark`).".into());
         }
         Ok(c)
     }
@@ -171,12 +177,13 @@ impl Feature for DraftHead {
             seq_len: 2048,
             loss: match p.kind {
                 Kind::Medusa => "cross-entropy of head k on token t+k+1".into(),
-                _ => "feature regression (smooth L1) plus cross-entropy through the frozen LM head".into(),
+                Kind::Eagle => "feature regression (smooth L1) plus cross-entropy through the frozen LM head".into(),
+                Kind::Dspark => "0.1·CE + 0.9·L1 to the target's next-token distribution + confidence BCE, decayed exp(-i/4) over block positions".into(),
             },
             data: "the target model's own responses to chat, code and reasoning prompts (self-distillation), so drafts match what verification accepts".into(),
-            teacher_forward: false,
+            teacher_forward: p.kind == Kind::Dspark,
             trunk: TrunkUse::Frozen,
-            precomputed_features: true,
+            precomputed_features: p.kind != Kind::Dspark,
         }];
         Ok(Estimate {
             effects,
@@ -195,7 +202,7 @@ impl Feature for DraftHead {
             references: vec![
                 "Cai et al., 2024, Medusa, arXiv 2401.10774 (§2.1 heads, §2.2 Medusa-1 training)".into(),
                 "Li et al., 2024, EAGLE, arXiv 2401.15077 (§3 architecture and training); EAGLE-3, arXiv 2503.01840".into(),
-                "DeepSeek-V4.1-Flash, arXiv 2609.19969 (DSpark drafter)".into(),
+                "DeepSeek-V4.1-Flash, arXiv 2609.19969 (DSpark drafter); DeepSpec (github.com/deepseek-ai/DeepSpec): deepspec/modeling/dspark/, config/dspark/".into(),
             ],
         })
     }
@@ -217,7 +224,7 @@ impl Feature for DraftHead {
             match p.kind {
                 Kind::Medusa => format!("Train it: `modelbuilder job draft-align <target.gguf> --kind medusa --heads {} --features <dir> -o <run>` (draft_align stage; `--share-lm-head` for the cheaper variant).", p.size.unwrap_or(4)),
                 Kind::Eagle => format!("Train it: `modelbuilder job draft-align <target.gguf> --kind eagle --blocks {} --reference <hf-dir> --features <dir> -o <run>` (draft_align stage).", p.size.unwrap_or(1)),
-                Kind::Dspark => "No training stage yet: the paper describes the drafter but there is no public reference code to follow.".into(),
+                Kind::Dspark => format!("Train it: `modelbuilder job draft-align <target.gguf> --kind dspark --blocks {} --reference <hf-dir> --texts <self-generated.jsonl> -o <run>` (draft_align stage, target online); convert with the PrismML fork's `convert_hf_to_gguf.py <run>/dspark-head --target-model-dir <target hf>`.", p.size.unwrap_or(5)),
             },
         ])
     }
@@ -251,11 +258,15 @@ impl Feature for DraftHead {
                 crate::Produces::Nothing,
                 "Writes {run}/eagle-head (safetensors).",
             ),
-            Kind::Dspark => crate::RunStep::missing(
-                TrunkUse::Frozen,
-                &stage,
-                "No public reference implementation of DSpark to follow.",
-            ),
+            Kind::Dspark => {
+                return Ok(vec![crate::RunStep::run(
+                    TrunkUse::Frozen,
+                    Some(&stage),
+                    format!("modelbuilder job draft-align {{model}} --kind dspark --blocks {} --reference <hf-reference> --texts <self-generated.jsonl> -o {{run}}", p.size.unwrap_or(5)),
+                    crate::Produces::Nothing,
+                    "Writes {run}/dspark-head (Qwen3DSparkModel HF format); convert with the PrismML fork's convert_hf_to_gguf.py --target-model-dir and run with --spec-type draft-dspark.",
+                )]);
+            }
         };
         Ok(vec![extract, train])
     }
@@ -264,7 +275,7 @@ impl Feature for DraftHead {
         let p: P = parse_params(ID, params)?;
         Ok(vec![match p.kind {
             Kind::Medusa | Kind::Eagle => "vLLM and SGLang load Medusa and EAGLE drafters; check your llama.cpp build for the draft types it supports.".into(),
-            Kind::Dspark => "No public runtime runs DSpark drafters; this needs custom inference code.".into(),
+            Kind::Dspark => "The PrismML llama.cpp fork runs DSpark drafters (`-md <drafter.gguf> --spec-type draft-dspark`) after converting the HF checkpoint with its convert_hf_to_gguf.py.".into(),
         }])
     }
 }

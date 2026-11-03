@@ -39,12 +39,12 @@ def run_torch(spec: JobSpec, spec_dir: Path, ev: EventWriter) -> dict[str, str]:
                 )
             )
         elif stage.kind == "draft_align":
+            from modelbuilder_train.draft.dspark_train import run_dspark
             from modelbuilder_train.draft.train import run_draft_align
 
+            run = run_dspark if stage.draft_align.kind == "dspark" else run_draft_align
             outputs.update(
-                run_draft_align(
-                    stage.draft_align, stage.hyper, lambda p: resolve(spec_dir, p), out_dir, device, ev, spec.job_id
-                )
+                run(stage.draft_align, stage.hyper, lambda p: resolve(spec_dir, p), out_dir, device, ev, spec.job_id)
             )
         else:  # pragma: no cover - the spec model rejects unknown kinds
             raise ValueError(f"stage kind {stage.kind} is not supported by the torch backend")

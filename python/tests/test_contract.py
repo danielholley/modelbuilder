@@ -17,6 +17,7 @@ EVENT_SCHEMA = json.loads((SCHEMA / "events.v1.schema.json").read_text())
 EXAMPLE = json.loads((SCHEMA / "examples" / "mtp-align.job.json").read_text())
 DISTILL = json.loads((SCHEMA / "examples" / "trunk-distill.job.json").read_text())
 DRAFT = json.loads((SCHEMA / "examples" / "draft-align.job.json").read_text())
+DSPARK = json.loads((SCHEMA / "examples" / "dspark-align.job.json").read_text())
 
 
 def both_accept(doc: dict) -> None:
@@ -35,6 +36,7 @@ def test_example_spec_is_valid():
     both_accept(EXAMPLE)
     both_accept(DISTILL)
     both_accept(DRAFT)
+    both_accept(DSPARK)
     medusa = copy.deepcopy(DRAFT)
     d = medusa["stages"][0]["draft_align"]
     d.update(kind="medusa", reference_config=None, share_lm_head=True)
@@ -56,6 +58,21 @@ def test_example_spec_is_valid():
 )
 def test_bad_draft_align_is_rejected_by_both(mutate):
     doc = copy.deepcopy(DRAFT)
+    mutate(doc["stages"][0])
+    both_reject(doc)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda d: d["draft_align"].pop("target"),  # DSpark runs the target online
+        lambda d: d["draft_align"].pop("texts"),
+        lambda d: d["draft_align"].update(block_size=1),
+        lambda d: d["draft_align"].update(mask_token_id=-1),
+    ],
+)
+def test_bad_dspark_is_rejected_by_both(mutate):
+    doc = copy.deepcopy(DSPARK)
     mutate(doc["stages"][0])
     both_reject(doc)
 

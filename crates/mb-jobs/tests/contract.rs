@@ -17,6 +17,7 @@ fn example_specs_round_trip() {
         "mtp-align.job.json",
         "trunk-distill.job.json",
         "draft-align.job.json",
+        "dspark-align.job.json",
     ] {
         let text = std::fs::read_to_string(schema_dir().join("examples").join(name)).unwrap();
         let spec: JobSpec = serde_json::from_str(&text).unwrap();

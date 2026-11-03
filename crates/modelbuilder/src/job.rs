@@ -202,21 +202,40 @@ pub struct TrunkDistillArgs {
 pub struct DraftAlignArgs {
     /// Target model (.gguf).
     target: PathBuf,
-    /// medusa or eagle.
+    /// medusa, eagle or dspark.
     #[arg(long)]
     kind: String,
-    /// Trunk feature directory computed from the target.
+    /// Medusa / EAGLE: trunk feature directory computed from the target.
     #[arg(long)]
-    features: PathBuf,
+    features: Option<PathBuf>,
     /// EAGLE: HF directory with the target's config.json (e.g. its base model).
+    /// DSpark: the HF reference to export the target with (config, tokenizer).
     #[arg(long)]
     reference: Option<PathBuf>,
+    /// DSpark: training texts (JSONL with `text` or `tokens`), ideally the target's own generations.
+    #[arg(long)]
+    texts: Option<PathBuf>,
     /// Medusa: number of heads.
     #[arg(long, default_value_t = 4)]
     heads: u32,
-    /// EAGLE: decoder layers.
-    #[arg(long, default_value_t = 1)]
-    blocks: u32,
+    /// EAGLE / DSpark: decoder layers (default 1 for EAGLE, 5 for DSpark).
+    #[arg(long)]
+    blocks: Option<u32>,
+    /// DSpark: tokens drafted per pass.
+    #[arg(long, default_value_t = 7)]
+    block_size: u32,
+    /// DSpark: target layers to tap, e.g. 1,9,17,25,33 (default: five spread evenly).
+    #[arg(long, value_delimiter = ',')]
+    target_layers: Option<Vec<i64>>,
+    /// DSpark: a token id the tokenizer never produces (default: the last embedding row).
+    #[arg(long)]
+    mask_token_id: Option<u64>,
+    /// DSpark: Markov head rank (0 turns it and the confidence head off).
+    #[arg(long, default_value_t = 256)]
+    markov_rank: u32,
+    /// DSpark: anchor blocks sampled per sequence.
+    #[arg(long, default_value_t = 512)]
+    num_anchors: u32,
     /// Medusa: reuse the frozen LM head instead of training a copy per head.
     #[arg(long)]
     share_lm_head: bool,
@@ -657,28 +676,89 @@ fn trunk_distill(a: TrunkDistillArgs) -> Result<()> {
 }
 
 fn draft_align(a: DraftAlignArgs) -> Result<()> {
+    use mb_jobs::DraftKind;
     let kind = match a.kind.as_str() {
-        "medusa" => mb_jobs::DraftKind::Medusa,
-        "eagle" => mb_jobs::DraftKind::Eagle,
-        k => bail!("unknown drafter kind {k}; use medusa or eagle"),
+        "medusa" => DraftKind::Medusa,
+        "eagle" => DraftKind::Eagle,
+        "dspark" => DraftKind::Dspark,
+        k => bail!("unknown drafter kind {k}; use medusa, eagle or dspark"),
     };
     let reference_config = match (&a.reference, kind) {
-        (Some(r), _) => Some(absolute(&r.join("config.json"))?),
-        (None, mb_jobs::DraftKind::Eagle) => {
+        (Some(r), DraftKind::Eagle) => Some(absolute(&r.join("config.json"))?),
+        (None, DraftKind::Eagle) => {
             bail!("an EAGLE drafter needs --reference <hf-dir> for the decoder layer's shape")
         }
-        (None, _) => None,
+        _ => None,
     };
-    if !has_manifest(&a.features) {
-        bail!(
-            "{} is not a feature directory (no manifest.json)",
-            a.features.display()
-        );
-    }
     let (target, target_ir) = open(&a.target)?;
     std::fs::create_dir_all(&a.out)?;
     let out = absolute(&a.out)?;
-    let lm_head = export_frozen(&target, &target_ir, &out, a.force)?;
+    let mut draft = mb_jobs::DraftAlign {
+        kind,
+        heads: a.heads,
+        blocks: a
+            .blocks
+            .unwrap_or(if kind == DraftKind::Dspark { 5 } else { 1 }),
+        share_lm_head: a.share_lm_head,
+        reference_config: reference_config.map(|p| p.display().to_string()),
+        frozen_tensors: None,
+        embedding_tensor: None,
+        lm_head_tensor: None,
+        features: None,
+        target: None,
+        texts: None,
+        block_size: a.block_size,
+        target_layer_ids: a.target_layers.clone(),
+        mask_token_id: a.mask_token_id,
+        markov_rank: a.markov_rank,
+        num_anchors: a.num_anchors,
+        confidence_head: a.markov_rank > 0,
+        eval_fraction: 0.05,
+    };
+    if kind == DraftKind::Dspark {
+        // The target runs online in PyTorch: export it once (primal basis, f32).
+        let (Some(reference), Some(texts)) = (&a.reference, &a.texts) else {
+            bail!("a DSpark drafter needs --reference <hf-dir> (to export the target) and --texts")
+        };
+        let hf = out.join("target-hf");
+        if hf.join("config.json").is_file() && !a.force {
+            println!(
+                "using existing {} (pass --force to re-export)",
+                hf.display()
+            );
+        } else {
+            let opts = mb_surgery::hf_export::HfExportOptions {
+                reference: reference.clone(),
+                dtype: mb_ir::DType::F32,
+                shard_bytes: 5 << 30,
+                layers: None,
+                globals: true,
+                overwrite: true,
+            };
+            mb_surgery::hf_export::export_hf(&target, &target_ir, &hf, &opts)?;
+            println!("exported the target to {}", hf.display());
+        }
+        draft.target = Some("target-hf".into());
+        draft.texts = Some(absolute(texts)?.display().to_string());
+    } else {
+        let Some(features) = &a.features else {
+            bail!(
+                "{:?} drafters train on precomputed features: pass --features",
+                kind
+            )
+        };
+        if !has_manifest(features) {
+            bail!(
+                "{} is not a feature directory (no manifest.json)",
+                features.display()
+            );
+        }
+        let lm_head = export_frozen(&target, &target_ir, &out, a.force)?;
+        draft.frozen_tensors = Some(FROZEN.into());
+        draft.embedding_tensor = Some(EMBED.into());
+        draft.lm_head_tensor = Some(lm_head.into());
+        draft.features = Some(absolute(features)?.display().to_string());
+    }
     let mut hyper = Hyper::mtp_align_default();
     hyper.lr = 1e-3;
     macro_rules! set {
@@ -701,18 +781,7 @@ fn draft_align(a: DraftAlignArgs) -> Result<()> {
     let spec = mb_jobs::draft_align_spec(mb_jobs::DraftAlignInputs {
         job_id: format!("{}-align-{}", a.kind, stem(&a.target)),
         output_dir: ".".into(),
-        draft: mb_jobs::DraftAlign {
-            kind,
-            heads: a.heads,
-            blocks: a.blocks,
-            share_lm_head: a.share_lm_head,
-            reference_config: reference_config.map(|p| p.display().to_string()),
-            frozen_tensors: FROZEN.into(),
-            embedding_tensor: EMBED.into(),
-            lm_head_tensor: lm_head.into(),
-            features: absolute(&a.features)?.display().to_string(),
-            eval_fraction: 0.05,
-        },
+        draft,
         hardware_profile: a.hardware,
         device: parse_device(&a.device)?,
         hyper,
@@ -730,8 +799,15 @@ fn draft_align(a: DraftAlignArgs) -> Result<()> {
     let outputs = launch(&spec_path, &a.py)?;
     print_outputs(&outputs);
     println!(
-        "\nThe drafter is in safetensors form; llama.cpp has no Medusa or EAGLE-1 loader for it, \
-         so serve it with a runtime that does (e.g. vLLM) or use the MTP path for GGUF targets."
+        "{}",
+        if kind == DraftKind::Dspark {
+            "\nThe drafter is an HF checkpoint in the Qwen3DSparkModel format: convert it with the PrismML \
+             fork's `convert_hf_to_gguf.py <out>/dspark-head --target-model-dir <target hf>` and run it \
+             with `--spec-type draft-dspark`."
+        } else {
+            "\nThe drafter is in safetensors form; llama.cpp has no Medusa or EAGLE-1 loader for it, \
+             so serve it with a runtime that does (e.g. vLLM) or use the MTP path for GGUF targets."
+        }
     );
     Ok(())
 }

@@ -96,6 +96,8 @@ pub struct Stage {
 pub enum DraftKind {
     Medusa,
     Eagle,
+    /// DeepSeek's DSpark block drafter (DeepSpec), with the target online.
+    Dspark,
 }
 
 /// Trains a Medusa or EAGLE drafter against a frozen target from
@@ -117,12 +119,46 @@ pub struct DraftAlign {
     /// EAGLE: the target's HF config, for the decoder layer's shape.
     #[serde(default)]
     pub reference_config: Option<String>,
-    pub frozen_tensors: String,
-    pub embedding_tensor: String,
-    pub lm_head_tensor: String,
-    pub features: String,
+    /// Medusa / EAGLE: precomputed features and the frozen tensors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_tensors: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_tensor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lm_head_tensor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<String>,
+    /// DSpark: the target's HF directory (run online) and the texts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texts: Option<String>,
+    #[serde(default = "default_block_size")]
+    pub block_size: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_layer_ids: Option<Vec<i64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_token_id: Option<u64>,
+    #[serde(default = "default_markov_rank")]
+    pub markov_rank: u32,
+    #[serde(default = "default_num_anchors")]
+    pub num_anchors: u32,
+    #[serde(default = "default_true")]
+    pub confidence_head: bool,
     #[serde(default = "default_eval_fraction")]
     pub eval_fraction: f64,
+}
+
+fn default_block_size() -> u32 {
+    7
+}
+
+fn default_markov_rank() -> u32 {
+    256
+}
+
+fn default_num_anchors() -> u32 {
+    512
 }
 
 fn default_heads() -> u32 {
@@ -329,6 +365,30 @@ impl JobSpec {
                             "stage {}: an EAGLE drafter needs reference_config",
                             s.name
                         ));
+                    }
+                    let missing = match d.kind {
+                        DraftKind::Dspark => d.target.is_none() || d.texts.is_none(),
+                        _ => {
+                            d.frozen_tensors.is_none()
+                                || d.embedding_tensor.is_none()
+                                || d.lm_head_tensor.is_none()
+                                || d.features.is_none()
+                        }
+                    };
+                    if missing {
+                        return bad(format!(
+                            "stage {}: {:?} drafters need {}",
+                            s.name,
+                            d.kind,
+                            if d.kind == DraftKind::Dspark {
+                                "target and texts"
+                            } else {
+                                "frozen_tensors, embedding_tensor, lm_head_tensor and features"
+                            }
+                        ));
+                    }
+                    if d.block_size < 2 {
+                        return bad(format!("stage {}: block_size must be >= 2", s.name));
                     }
                     if !(0.0..=0.5).contains(&d.eval_fraction) {
                         return bad(format!(
@@ -780,6 +840,7 @@ pub fn draft_align_spec(i: DraftAlignInputs) -> JobSpec {
     let name = match i.draft.kind {
         DraftKind::Medusa => "medusa-align",
         DraftKind::Eagle => "eagle-align",
+        DraftKind::Dspark => "dspark-align",
     };
     JobSpec {
         schema_version: SCHEMA_VERSION,

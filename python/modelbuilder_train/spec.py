@@ -55,21 +55,38 @@ class TrunkDistill(_Strict):
 
 
 class DraftAlign(_Strict):
-    kind: Literal["medusa", "eagle"]
+    kind: Literal["medusa", "eagle", "dspark"]
     heads: int = Field(default=4, ge=1)
     blocks: int = Field(default=1, ge=1)
     share_lm_head: bool = False
     reference_config: str | None = None
-    frozen_tensors: str
-    embedding_tensor: str
-    lm_head_tensor: str
-    features: str
+    # Medusa and EAGLE: precomputed features and the frozen tensors.
+    frozen_tensors: str | None = None
+    embedding_tensor: str | None = None
+    lm_head_tensor: str | None = None
+    features: str | None = None
+    # DSpark: an online target (HF directory) and texts.
+    target: str | None = None
+    texts: str | None = None
+    block_size: int = Field(default=7, ge=2)
+    target_layer_ids: list[int] | None = None
+    mask_token_id: int | None = Field(default=None, ge=0)
+    markov_rank: int = Field(default=256, ge=0)
+    num_anchors: int = Field(default=512, ge=1)
+    confidence_head: bool = True
     eval_fraction: float = Field(default=0.05, ge=0, le=0.5)
 
     @model_validator(mode="after")
-    def _eagle_shape(self) -> DraftAlign:
+    def _inputs(self) -> DraftAlign:
         if self.kind == "eagle" and self.reference_config is None:
             raise ValueError("an EAGLE drafter needs reference_config")
+        if self.kind == "dspark":
+            if self.target is None or self.texts is None:
+                raise ValueError("a DSpark drafter needs target and texts")
+            if self.confidence_head and self.markov_rank == 0:
+                raise ValueError("the DSpark confidence head reads the Markov embedding: markov_rank must be > 0")
+        elif None in (self.frozen_tensors, self.embedding_tensor, self.lm_head_tensor, self.features):
+            raise ValueError(f"{self.kind} needs frozen_tensors, embedding_tensor, lm_head_tensor and features")
         return self
 
 

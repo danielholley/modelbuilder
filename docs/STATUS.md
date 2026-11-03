@@ -68,6 +68,18 @@ speculative decoding and **DeepSeek-V4.1-Flash-style KV cache changes**.
   norm in the first, SmoothL1 + 0.1·CE), trained from the same precomputed
   features as `mtp_align`. New stage kind in the schema, Rust and pydantic
   types; `modelbuilder job draft-align`.
+- **DSpark drafters** (`job draft-align --kind dspark`), following
+  DeepSeek's reference trainer DeepSpec (MIT; `deepspec/modeling/dspark/`),
+  read but not run: hidden states tapped from five target layers (default
+  taps reproduce the published configs) are the keys and values of a
+  non-causal block drafter; blocks `[anchor, MASK, ...]` draft 7 tokens
+  through decoder layers of the target's shape, with the vanilla Markov head
+  and the confidence head; loss 0.1·CE + 0.9·L1 to the target distribution
+  + confidence BCE, decayed over block positions. The target runs online in
+  transformers. Output is an HF checkpoint in the `Qwen3DSparkModel` format,
+  with the same tensor names as `deepseek-ai/dspark_qwen3_4b_block7`, for
+  the PrismML fork's converter (`--target-model-dir`) and
+  `--spec-type draft-dspark`. Not yet converted and run in llama.cpp.
 - **`trunk_distill` options**:
   - `teacher`: a separate checkpoint to distill from (e.g. the unpruned
     original);
@@ -147,7 +159,7 @@ python -m modelbuilder_train generate-corpus | extract-features | run | validate
 
 ### Test coverage
 
-106 Rust tests, 80 Python tests (including end-to-end runs through the Rust
+106 Rust tests, 92 Python tests (including end-to-end runs through the Rust
 binary on fixtures: MTP alignment, KV QAT, MLA recovery, healing a pruned
 model against its original, LoRA write-back, draft heads) and 7 web tests,
 all in CI. Every test uses tiny synthetic checkpoints; nothing downloads a
@@ -175,8 +187,6 @@ These need hardware, data or runtime code that isn't in this repository:
   llama.cpp wasn't possible in the session that wrote it). The `qwen35moe`
   key and tensor names follow llama.cpp's qwen2moe/qwen3next conventions
   and need that run to confirm.
-- **DSpark drafters**: the paper describes the drafter but there is no
-  public reference code to follow.
 - **Backends**: `mlx` runs `mtp_align` only (other stages use torch on MPS).
   Multi-node training is FSDP2 over `torchrun` in the `hf` stage; tensor,
   pipeline or context parallelism (a `torchtitan` backend) for continued
@@ -188,7 +198,8 @@ These need hardware, data or runtime code that isn't in this repository:
 1. Run the real-model checks above on the cluster (item 6 and 8 of the
    revised order below).
 2. Run upcycled fixtures in llama.cpp (logits equal to the dense model's),
-   including the `qwen35moe` loader.
+   including the `qwen35moe` loader, and convert and run a trained DSpark
+   drafter with the fork (`--spec-type draft-dspark`).
 3. Run `trunk_distill --device-map auto` and `--shard fsdp` on real GPUs.
 
 ## Target hardware (the user's cluster)

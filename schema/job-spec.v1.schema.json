@@ -350,21 +350,18 @@
       }
     },
     "draft_align": {
-      "description": "Train a Medusa or EAGLE drafter against a frozen target from precomputed trunk hidden states.",
+      "description": "Train a speculative-decoding drafter against a frozen target: Medusa or EAGLE from precomputed trunk hidden states, or DSpark (DeepSeek's DeepSpec) with the target online.",
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "kind",
-        "frozen_tensors",
-        "embedding_tensor",
-        "lm_head_tensor",
-        "features"
+        "kind"
       ],
       "properties": {
         "kind": {
           "enum": [
             "medusa",
-            "eagle"
+            "eagle",
+            "dspark"
           ]
         },
         "heads": {
@@ -377,7 +374,7 @@
           "type": "integer",
           "minimum": 1,
           "default": 1,
-          "description": "EAGLE: decoder layers."
+          "description": "EAGLE / DSpark: decoder layers."
         },
         "share_lm_head": {
           "type": "boolean",
@@ -392,18 +389,82 @@
           "description": "EAGLE (required): the target's HF config.json, for the decoder layer's shape."
         },
         "frozen_tensors": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "safetensors with the target's token embedding and output head in the primal basis (modelbuilder export-tensors)."
         },
         "embedding_tensor": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "lm_head_tensor": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "features": {
-          "type": "string",
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Feature directory from modelbuilder_train extract-features."
+        },
+        "target": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "DSpark: HF directory of the target (e.g. from modelbuilder export-hf); it runs online for the tapped hidden states."
+        },
+        "texts": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "DSpark: JSONL with {\"text\": ...} or {\"tokens\": [...]} per line."
+        },
+        "block_size": {
+          "type": "integer",
+          "minimum": 2,
+          "default": 7
+        },
+        "target_layer_ids": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "minimum": -1
+          },
+          "description": "DSpark: target layers to tap (-1: the embedding); default five spread evenly."
+        },
+        "mask_token_id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "DSpark: a token id the tokenizer never produces; default the last embedding row."
+        },
+        "markov_rank": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 256
+        },
+        "num_anchors": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 512
+        },
+        "confidence_head": {
+          "type": "boolean",
+          "default": true
         },
         "eval_fraction": {
           "type": "number",
@@ -412,23 +473,84 @@
           "default": 0.05
         }
       },
-      "if": {
-        "properties": {
-          "kind": {
-            "const": "eagle"
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "eagle"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reference_config"
+            ],
+            "properties": {
+              "reference_config": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "medusa",
+                  "eagle"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "frozen_tensors",
+              "embedding_tensor",
+              "lm_head_tensor",
+              "features"
+            ],
+            "properties": {
+              "frozen_tensors": {
+                "type": "string"
+              },
+              "embedding_tensor": {
+                "type": "string"
+              },
+              "lm_head_tensor": {
+                "type": "string"
+              },
+              "features": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "dspark"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "target",
+              "texts"
+            ],
+            "properties": {
+              "target": {
+                "type": "string"
+              },
+              "texts": {
+                "type": "string"
+              }
+            }
           }
         }
-      },
-      "then": {
-        "required": [
-          "reference_config"
-        ],
-        "properties": {
-          "reference_config": {
-            "type": "string"
-          }
-        }
-      }
+      ]
     }
   }
 }
