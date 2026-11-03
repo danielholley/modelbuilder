@@ -197,6 +197,56 @@ fn prune_config(cfg: &mut Value, a: usize, b: usize) {
     o.insert("num_hidden_layers".into(), json!(n as usize - (b - a)));
 }
 
+/// YaRN scaling set in the GGUF (e.g. by `surgery yarn`): `(factor,
+/// original context, context)`.
+fn yarn(ir: &ModelIr) -> Option<(f64, u64, Option<u64>)> {
+    let mb_ir::Metadata::Gguf { kv, .. } = &ir.raw.metadata else {
+        return None;
+    };
+    let arch = ir.family.as_deref()?;
+    let get = |k: &str| {
+        kv.iter()
+            .find(|(x, _)| *x == format!("{arch}.{k}"))
+            .map(|(_, v)| v)
+    };
+    if get("rope.scaling.type")?.as_str()? != "yarn" {
+        return None;
+    }
+    let factor = match get("rope.scaling.factor")? {
+        mb_ir::MetaValue::F32(f) => f64::from(*f),
+        mb_ir::MetaValue::F64(f) => *f,
+        v => v.as_u64()? as f64,
+    };
+    let orig = get("rope.scaling.original_context_length")?.as_u64()?;
+    Some((factor, orig, get("context_length").and_then(|v| v.as_u64())))
+}
+
+/// Writes the YaRN scaling into a text config, in `rope_parameters` when the
+/// config has that (transformers ≥ 5) and `rope_scaling` otherwise.
+fn yarn_config(cfg: &mut Value, factor: f64, orig: u64, ctx: Option<u64>) {
+    let Some(o) = cfg.as_object_mut() else {
+        return;
+    };
+    let scaling = json!({
+        "rope_type": "yarn",
+        "factor": factor,
+        "original_max_position_embeddings": orig,
+    });
+    match o.get_mut("rope_parameters").and_then(Value::as_object_mut) {
+        Some(rp) => {
+            for (k, v) in scaling.as_object().expect("object") {
+                rp.insert(k.clone(), v.clone());
+            }
+        }
+        None => {
+            o.insert("rope_scaling".into(), scaling);
+        }
+    }
+    if let Some(c) = ctx {
+        o.insert("max_position_embeddings".into(), json!(c));
+    }
+}
+
 /// Writes `out_dir/{config.json, model-XXXXX-of-YYYYY.safetensors,
 /// model.safetensors.index.json, tokenizer files}`.
 pub fn export_hf(
@@ -216,6 +266,9 @@ pub fn export_hf(
     let pruned = pruned_layers(ir);
     if let Some((a, b)) = pruned {
         prune_config(&mut t, a, b);
+    }
+    if let Some((factor, orig, ctx)) = yarn(ir) {
+        yarn_config(&mut t, factor, orig, ctx);
     }
     let dims = Dims::from_config(&t, adapter)?;
     if ir.layers.len() != dims.layers {

@@ -45,6 +45,8 @@ class TrunkDistill(_Strict):
     kv_format: Literal["q8_0", "q4_0", "nvfp4"] | None = None
     kv_share_group: int | None = Field(default=None, ge=2)
     weight_fakequant: bool = True
+    teacher: str | None = None
+    loss: Literal["kl", "ce"] = "kl"
     eval_fraction: float = Field(default=0.05, ge=0, le=0.5)
 
 

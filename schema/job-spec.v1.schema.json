@@ -246,7 +246,7 @@
       }
     },
     "trunk_distill": {
-      "description": "Retrain selected trunk tensors so a modified model (quantized KV cache, shared KV, fake-quantized weights) matches the original, by KL on next-token distributions.",
+      "description": "Retrain selected trunk tensors so a modified model (quantized KV cache, shared KV, fake-quantized weights, MLA, removed layers) matches the original by KL on next-token distributions, or train them on next-token cross-entropy.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -291,6 +291,21 @@
         "weight_fakequant": {
           "type": "boolean",
           "default": true
+        },
+        "teacher": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "A separate HF checkpoint to distill from (e.g. the unpruned or unmodified original). Default: the model itself with every modification switched off."
+        },
+        "loss": {
+          "enum": [
+            "kl",
+            "ce"
+          ],
+          "default": "kl",
+          "description": "kl: KL to the teacher's next-token distribution; ce: next-token cross-entropy on the texts (no teacher), e.g. a long-context finetune."
         },
         "eval_fraction": {
           "type": "number",

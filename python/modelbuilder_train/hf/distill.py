@@ -15,7 +15,12 @@ student is the same model with its modifications on:
 
 The teacher is the same weights with everything switched off: the original
 values of the trainable tensors and a plain cache. So no second copy of the
-model is held. The loss is KL(teacher ‖ student) on next-token distributions,
+model is held. A separate ``teacher`` checkpoint (e.g. the unpruned original
+when healing a pruned model) replaces that, at the cost of a second model in
+memory. With ``loss = "ce"`` there is no teacher: the trainable tensors learn
+next-token cross-entropy on the texts (e.g. a long-context finetune).
+
+Otherwise the loss is KL(teacher ‖ student) on next-token distributions,
 computed in chunks of positions so a large vocabulary never materializes all
 at once. Only tensors whose names contain one of ``trainable`` are updated.
 The output ``updates/`` directory has those tensors (HF names, float32) plus
@@ -80,15 +85,31 @@ def load_sequences(path: Path, tokenizer_dir: Path) -> list[list[int]]:
     return [tok(x["text"], add_special_tokens=True).input_ids for x in lines]
 
 
-def kl_and_agreement(student_h, teacher_h, lm_head: nn.Module) -> tuple[torch.Tensor, int, int]:
+def ce_and_accuracy(student_h, targets: torch.Tensor, lm_head: nn.Module) -> tuple[torch.Tensor, int, int]:
+    """Summed next-token cross-entropy, top-1 hits, positions (``student_h[i]`` predicts ``targets[i]``)."""
+    total = student_h.new_zeros((), dtype=torch.float32)
+    hits = 0
+    n = student_h.shape[0]
+    for a in range(0, n, LOGIT_CHUNK):
+        s = lm_head(student_h[a : a + LOGIT_CHUNK]).float()
+        t = targets[a : a + LOGIT_CHUNK]
+        total = total + F.cross_entropy(s, t, reduction="sum")
+        hits += int((s.argmax(-1) == t).sum())
+    return total, hits, n
+
+
+def kl_and_agreement(
+    student_h, teacher_h, lm_head: nn.Module, teacher_head: nn.Module | None = None
+) -> tuple[torch.Tensor, int, int]:
     """Summed KL(teacher ‖ student) over positions, top-1 agreements, positions."""
+    teacher_head = teacher_head or lm_head
     total = student_h.new_zeros((), dtype=torch.float32)
     agree = 0
     n = student_h.shape[0]
     for a in range(0, n, LOGIT_CHUNK):
         s = lm_head(student_h[a : a + LOGIT_CHUNK]).float()
         with torch.no_grad():
-            t = lm_head(teacher_h[a : a + LOGIT_CHUNK]).float()
+            t = teacher_head(teacher_h[a : a + LOGIT_CHUNK].to(s.device)).float()
         tp = F.log_softmax(t, -1)
         total = total + F.kl_div(F.log_softmax(s, -1), tp, log_target=True, reduction="sum")
         agree += int((s.argmax(-1) == t.argmax(-1)).sum())
@@ -111,6 +132,15 @@ def run_trunk_distill(
         model_dir, dtype=torch.bfloat16 if use_bf16 else torch.float32, attn_implementation=attention.NAME
     ).to(device)
     model.train()
+    teacher = None
+    if stage.teacher and stage.loss == "kl":
+        teacher = AutoModelForCausalLM.from_pretrained(
+            resolve(stage.teacher), dtype=torch.bfloat16 if use_bf16 else torch.float32
+        ).to(device)
+        teacher.eval().requires_grad_(False)
+        tv, sv = teacher.get_output_embeddings().weight.shape[0], model.get_output_embeddings().weight.shape[0]
+        if tv != sv:
+            raise ValueError(f"the teacher's vocabulary ({tv}) differs from the model's ({sv})")
 
     # What changes in the student.
     behavior = attention.CacheBehavior(kv_format=stage.kv_format)
@@ -155,7 +185,19 @@ def run_trunk_distill(
         mode.student = student
         behavior.enabled = student
         behavior.reset()
+        if not student and teacher is not None:
+            return teacher.get_decoder()(input_ids=ids[None]).last_hidden_state[0]
         return decoder(input_ids=ids[None]).last_hidden_state[0]
+
+    teacher_head = teacher.get_output_embeddings() if teacher is not None else None
+
+    def losses(ids: torch.Tensor) -> tuple[torch.Tensor, int, int]:
+        """Summed loss, top-1 agreements (or hits), positions."""
+        if stage.loss == "ce":
+            return ce_and_accuracy(pass_(ids, True)[:-1], ids[1:], lm_head)
+        with torch.no_grad():
+            t = pass_(ids, False)
+        return kl_and_agreement(pass_(ids, True), t, lm_head, teacher_head)
 
     def window(seq: list[int]) -> torch.Tensor:
         n = min(len(seq), hyper.seq_len)
@@ -167,9 +209,7 @@ def run_trunk_distill(
         with torch.no_grad():
             for seq in held:
                 ids = torch.tensor(seq[: hyper.seq_len], device=device)
-                t = pass_(ids, False)
-                s = pass_(ids, True)
-                k, a, n = kl_and_agreement(s, t, lm_head)
+                k, a, n = losses(ids)
                 kl_sum, agree, count = kl_sum + float(k), agree + a, count + n
         return {"loss": kl_sum / max(count, 1), "accuracy": agree / max(count, 1), "tokens": count}
 
@@ -192,13 +232,10 @@ def run_trunk_distill(
             g["lr"] = lr
         opt.zero_grad(set_to_none=True)
         batch = [window(rng.choice(train)) for _ in range(hyper.batch_seqs)]
-        n_targets = sum(len(b) for b in batch)
+        n_targets = sum(len(b) - (stage.loss == "ce") for b in batch)
         kl_total, agree_total = 0.0, 0
         for ids in batch:
-            with torch.no_grad():
-                t = pass_(ids, False)
-            s = pass_(ids, True)
-            k, a, _ = kl_and_agreement(s, t, lm_head)
+            k, a, _ = losses(ids)
             (k / n_targets).backward()
             kl_total, agree_total = kl_total + float(k.detach()), agree_total + a
         if dist.world() > 1:

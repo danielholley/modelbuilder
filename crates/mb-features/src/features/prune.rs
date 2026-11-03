@@ -227,10 +227,12 @@ impl Feature for Prune {
             "Measure the damage before healing: `modelbuilder_train probe perplexity`.",
         )];
         if p.heal {
-            v.push(crate::RunStep::missing(
+            v.push(crate::RunStep::run(
                 TrunkUse::Restructure,
-                "heal",
-                "Healing distills from the unpruned model, a second set of weights; trunk_distill only uses the model it trains as its own teacher.",
+                Some("heal"),
+                "modelbuilder job trunk-distill {model} --reference <hf-reference> --texts <texts.jsonl> --teacher {source} --trainable mlp. -o {run}".into(),
+                crate::Produces::Gguf("{run}/{stem}-heal.gguf".into()),
+                "Distills the pruned model from the unpruned one, training the MLPs' full tensors (the paper uses QLoRA; there is no LoRA option yet).",
             ));
         }
         Ok(v)

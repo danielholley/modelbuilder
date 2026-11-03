@@ -175,8 +175,30 @@ pub struct TrunkDistill {
     pub kv_share_group: Option<u32>,
     #[serde(default = "default_true")]
     pub weight_fakequant: bool,
+    /// A separate HF checkpoint to distill from (default: the model itself
+    /// with every modification switched off).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teacher: Option<String>,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub loss: DistillLoss,
     #[serde(default = "default_eval_fraction")]
     pub eval_fraction: f64,
+}
+
+/// What `trunk_distill` minimizes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum DistillLoss {
+    /// KL to the teacher's next-token distribution.
+    #[default]
+    Kl,
+    /// Next-token cross-entropy on the texts (no teacher).
+    Ce,
+}
+
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
 }
 
 fn default_true() -> bool {
@@ -597,6 +619,8 @@ pub struct TrunkDistillInputs {
     pub kv_format: Option<KvFormat>,
     pub kv_share_group: Option<u32>,
     pub weight_fakequant: bool,
+    pub teacher: Option<PathBuf>,
+    pub loss: DistillLoss,
     pub hardware_profile: Option<String>,
     pub device: Device,
     pub hyper: Hyper,
@@ -642,6 +666,8 @@ pub fn trunk_distill_spec(i: TrunkDistillInputs) -> JobSpec {
                 kv_format: i.kv_format,
                 kv_share_group: i.kv_share_group,
                 weight_fakequant: i.weight_fakequant,
+                teacher: i.teacher.as_deref().map(s),
+                loss: i.loss,
                 eval_fraction: 0.05,
             }),
             draft_align: None,

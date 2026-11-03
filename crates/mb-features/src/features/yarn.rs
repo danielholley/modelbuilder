@@ -215,10 +215,12 @@ impl Feature for Yarn {
             "Metadata only. Check retrieval at the new length with `modelbuilder_train probe needle`.",
         )];
         if p.finetune {
-            v.push(crate::RunStep::missing(
+            v.push(crate::RunStep::run(
                 TrunkUse::Restructure,
-                "long-context",
-                "A long-context finetune needs long documents and a next-token (not distillation) stage, which modelbuilder doesn't have yet.",
+                Some("long-context"),
+                "modelbuilder job trunk-distill {model} --reference <hf-reference> --texts <long-documents.jsonl> --loss ce --seq-len <new context> --trainable self_attn. -o {run}".into(),
+                crate::Produces::Gguf("{run}/{stem}-finetune.gguf".into()),
+                "Next-token training on long documents with the scaling on (export-hf writes it into the HF config). YaRN trains every weight; the attention tensors are a cheaper start.",
             ));
         }
         Ok(v)

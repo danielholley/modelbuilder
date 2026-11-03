@@ -39,6 +39,9 @@ def test_example_spec_is_valid():
     d = medusa["stages"][0]["draft_align"]
     d.update(kind="medusa", reference_config=None, share_lm_head=True)
     both_accept(medusa)
+    heal = copy.deepcopy(DISTILL)
+    heal["stages"][0]["trunk_distill"].update(teacher="teacher", loss="kl")
+    both_accept(heal)
 
 
 @pytest.mark.parametrize(
@@ -65,6 +68,8 @@ def test_bad_draft_align_is_rejected_by_both(mutate):
         lambda s: s["trunk_distill"].update(kv_format="q3"),
         lambda s: s["trunk_distill"].update(trainable=[]),
         lambda s: s["trunk_distill"].update(extra=1),
+        lambda s: s["trunk_distill"].update(loss="mse"),
+        lambda s: s["trunk_distill"].update(teacher=3),
     ],
 )
 def test_bad_trunk_distill_is_rejected_by_both(mutate):

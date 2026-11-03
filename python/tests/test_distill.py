@@ -80,3 +80,40 @@ def test_trunk_distill_job_end_to_end(tmp_path: Path) -> None:
     assert "re-quantization error 0.000% RMS" in out
     info = json.loads(mb("inspect", str(new), "--json"))
     assert info  # the new checkpoint opens
+
+
+@pytest.mark.skipif(not BIN.exists(), reason=f"no modelbuilder binary at {BIN}")
+def test_heal_a_pruned_model_against_the_original(tmp_path: Path) -> None:
+    pytest.importorskip("transformers")
+    target = Path(mb("fixture", "gguf-llama", str(tmp_path / "t")).strip())
+    pruned = tmp_path / "pruned.gguf"
+    mb("surgery", "prune", str(target), "--layers", "1..2", "-o", str(pruned))
+    texts = tmp_path / "t.jsonl"
+    texts.write_text(
+        "".join(json.dumps({"tokens": [(5 * i + 3 * j) % 96 for j in range(48)]}) + "\n" for i in range(8))
+    )
+    common = ["--reference", str(target.parent), "--texts", str(texts), "--steps", "10", "--seq-len", "32",
+              "--batch-seqs", "2", "--lr", "3e-3", "--eval-every", "10", "--log-every", "5", "--device", "cpu",
+              "--fp32", "--raw-events", "--python", sys.executable, "--trainable", "mlp."]  # fmt: skip
+
+    def evals(out: str) -> list[dict]:
+        events = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
+        assert events[-1]["event"] == "finished" and events[-1]["status"] == "ok"
+        return [e for e in events if e["event"] == "eval"]
+
+    run = tmp_path / "heal"
+    out = mb("job", "trunk-distill", str(pruned), "--teacher", str(target), "-o", str(run), *common)
+    e = evals(out)
+    assert e[-1]["loss"] < e[0]["loss"], e
+    assert json.loads((run / "job.json").read_text())["stages"][0]["trunk_distill"]["teacher"].endswith("teacher")
+    assert (run / "pruned-heal.gguf").exists()
+
+    # Cross-entropy on the texts alone (e.g. a long-context finetune).
+    run = tmp_path / "ce"
+    out = mb("job", "trunk-distill", str(target), "--loss", "ce", "-o", str(run), *common)
+    e = evals(out)
+    assert e[-1]["loss"] < e[0]["loss"], e
+    assert json.loads((run / "job.json").read_text())["stages"][0]["trunk_distill"]["loss"] == "ce"
+    bad = mb("job", "trunk-distill", str(target), "--loss", "ce", "--teacher", str(target), "-o", str(run), *common,
+             check=False)  # fmt: skip
+    assert "drop --teacher" in bad

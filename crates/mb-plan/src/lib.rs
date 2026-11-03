@@ -236,7 +236,8 @@ pub fn pipeline(ctx: &Context, features: &[FeaturePlan]) -> Result<Pipeline, Pla
         }
     }
     steps.sort_by_key(|(_, s)| s.trunk);
-    let mut model = ctx.ir.raw.root.display().to_string();
+    let source = ctx.ir.raw.root.display().to_string();
+    let mut model = source.clone();
     let mut notes = Vec::new();
     let mut hf_only: Option<String> = None;
     let mut changed = false;
@@ -244,7 +245,8 @@ pub fn pipeline(ctx: &Context, features: &[FeaturePlan]) -> Result<Pipeline, Pla
     for (i, (fid, st)) in steps.into_iter().enumerate() {
         let run = format!("runs/{fid}");
         let fill = |t: &str| {
-            t.replace("{model}", &model)
+            t.replace("{source}", &source)
+                .replace("{model}", &model)
                 .replace("{stem}", &file_stem(&model))
                 .replace("{run}", &run)
         };
@@ -285,17 +287,23 @@ pub fn pipeline(ctx: &Context, features: &[FeaturePlan]) -> Result<Pipeline, Pla
             changed = true;
         }
     }
-    let adapt = out
-        .iter()
-        .filter(|s| {
-            s.trunk != TrunkUse::Frozen
-                && s.command
-                    .as_deref()
-                    .is_some_and(|c| c.contains("trunk-distill"))
+    if out.iter().any(|s| {
+        s.command.as_deref().is_some_and(|c| {
+            c.contains("trunk-distill") && !c.contains("--teacher") && !c.contains("--loss ce")
         })
-        .count();
-    if adapt > 1 {
-        notes.push("Each trunk-distill run uses the model it starts from as its teacher, so later runs distill from the earlier runs' results, not from the original model.".into());
+    }) && changed
+    {
+        notes.push("trunk-distill steps without --teacher distill from the model they start from with the change switched off (e.g. a plain KV cache), so they isolate their own change; heal-type steps pass --teacher with the original.".into());
+    }
+    if out.iter().any(|s| {
+        s.command
+            .as_deref()
+            .is_some_and(|c| c.contains("--teacher"))
+    }) {
+        notes.push(
+            "Steps with --teacher hold a second model in memory: the original they distill from."
+                .into(),
+        );
     }
     let missing: Vec<String> = out
         .iter()

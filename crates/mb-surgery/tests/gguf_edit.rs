@@ -88,4 +88,26 @@ fn yarn_sets_the_rope_scaling_keys() {
         Some(4 * orig)
     );
     assert!(y.rope.scaling.is_some(), "the IR sees the scaling");
+
+    // export-hf carries the scaling into the HF config, so training sees it.
+    let (ym, yir) = open(&out);
+    let hf = dir.path().join("hf");
+    let opts = mb_surgery::hf_export::HfExportOptions {
+        reference: dir.path().to_path_buf(),
+        dtype: mb_ir::DType::F32,
+        shard_bytes: 1 << 30,
+        layers: None,
+        globals: true,
+        overwrite: false,
+    };
+    mb_surgery::hf_export::export_hf(&ym, &yir, &hf, &opts).unwrap();
+    let cfg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(hf.join("config.json")).unwrap()).unwrap();
+    assert_eq!(cfg["rope_scaling"]["rope_type"], "yarn");
+    assert_eq!(cfg["rope_scaling"]["factor"], 4.0);
+    assert_eq!(
+        cfg["rope_scaling"]["original_max_position_embeddings"],
+        orig
+    );
+    assert_eq!(cfg["max_position_embeddings"], 4 * orig);
 }

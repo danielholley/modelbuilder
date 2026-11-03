@@ -124,6 +124,15 @@ pub struct TrunkDistillArgs {
     /// With `--mla-rank`: which RoPE frequencies to keep (high or uniform).
     #[arg(long, default_value = "high")]
     mla_select: String,
+    /// Distill from this model instead of the target itself (a GGUF, exported
+    /// with the same --reference, or an HF directory), e.g. the unpruned
+    /// original when healing a pruned model.
+    #[arg(long)]
+    teacher: Option<PathBuf>,
+    /// kl (match the teacher) or ce (next-token cross-entropy on the texts,
+    /// e.g. a long-context finetune).
+    #[arg(long, default_value = "kl")]
+    loss: String,
     /// KV-cache format to train for: q8_0, q4_0 or nvfp4.
     #[arg(long)]
     kv_format: Option<String>,
@@ -424,12 +433,22 @@ fn trunk_distill(a: TrunkDistillArgs) -> Result<()> {
         Some("nvfp4") => Some(KvFormat::Nvfp4),
         Some(f) => bail!("unknown KV format {f}; use q8_0, q4_0 or nvfp4"),
     };
+    let loss = match a.loss.as_str() {
+        "kl" => mb_jobs::DistillLoss::Kl,
+        "ce" => mb_jobs::DistillLoss::Ce,
+        l => bail!("unknown loss {l}; use kl or ce"),
+    };
     if kv_format.is_none()
         && a.kv_share_group.is_none()
         && a.mla_rank.is_none()
+        && a.teacher.is_none()
+        && loss == mb_jobs::DistillLoss::Kl
         && a.no_weight_fakequant
     {
-        bail!("nothing to distill for: pass --kv-format, --kv-share-group and/or --mla-rank");
+        bail!("nothing to distill for: pass --kv-format, --kv-share-group, --mla-rank, --teacher or --loss ce");
+    }
+    if a.teacher.is_some() && loss == mb_jobs::DistillLoss::Ce {
+        bail!("--loss ce trains on the texts alone; drop --teacher");
     }
     std::fs::create_dir_all(&a.out)?;
     let out = absolute(&a.out)?;
@@ -457,6 +476,34 @@ fn trunk_distill(a: TrunkDistillArgs) -> Result<()> {
             hf.display()
         );
     }
+
+    // A separate teacher, in PyTorch's layout too.
+    let teacher = match &a.teacher {
+        None => None,
+        Some(t) if t.is_dir() => Some(absolute(t)?),
+        Some(t) => {
+            let dir = out.join("teacher");
+            if dir.join("config.json").is_file() && !a.force {
+                println!(
+                    "using existing {} (pass --force to re-export)",
+                    dir.display()
+                );
+            } else {
+                let (m, ir) = open(t)?;
+                let opts = mb_surgery::hf_export::HfExportOptions {
+                    reference: a.reference.clone(),
+                    dtype: mb_ir::DType::F32,
+                    shard_bytes: 5 << 30,
+                    layers: None,
+                    globals: true,
+                    overwrite: true,
+                };
+                mb_surgery::hf_export::export_hf(&m, &ir, &dir, &opts)?;
+                println!("exported the teacher to {}", dir.display());
+            }
+            Some(dir)
+        }
+    };
 
     // MLA: the converted checkpoint links the export (the teacher) and adds the latent.
     let model_dir = match a.mla_rank {
@@ -505,6 +552,8 @@ fn trunk_distill(a: TrunkDistillArgs) -> Result<()> {
         (None, Some(_), Some(_)) => "kv-quant-share-qat",
         (None, Some(_), None) => "kv-quant-qat",
         (None, None, Some(_)) => "kv-share-qat",
+        (None, None, None) if loss == mb_jobs::DistillLoss::Ce => "finetune",
+        (None, None, None) if teacher.is_some() => "heal",
         (None, None, None) => "weight-qat",
     };
     let spec = mb_jobs::trunk_distill_spec(TrunkDistillInputs {
@@ -517,6 +566,8 @@ fn trunk_distill(a: TrunkDistillArgs) -> Result<()> {
         kv_format,
         kv_share_group: a.kv_share_group,
         weight_fakequant: !a.no_weight_fakequant,
+        teacher,
+        loss,
         hardware_profile: a.hardware,
         device: parse_device(&a.device)?,
         hyper,

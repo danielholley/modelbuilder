@@ -245,10 +245,12 @@ impl Feature for KvShare {
                 crate::Produces::Gguf("{run}/{stem}-kv-share-qat.gguf".into()),
                 "The written-back GGUF still holds every layer's K/V: no llama.cpp build runs reuse layers yet.",
             ),
-            crate::RunStep::missing(
+            crate::RunStep::run(
                 TrunkUse::Restructure,
-                "long-context",
-                "Not chained yet: trunk-distill's teacher is the model it starts from, so a second run on the adapted GGUF would distill from the adapted weights rather than the original.",
+                Some("long-context"),
+                format!("modelbuilder job trunk-distill {{model}} --reference <hf-reference> --texts <long-texts.jsonl> --teacher {{source}} --kv-share-group {} --seq-len 32768 -o {{run}}/long", p.group),
+                crate::Produces::Gguf("{run}/long/{stem}-kv-share-qat.gguf".into()),
+                "Continues from the adapted model at long context, distilling from the original.",
             ),
         ])
     }
