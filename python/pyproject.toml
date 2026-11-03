@@ -13,6 +13,8 @@ torch = ["torch>=2.2"]
 # The `trunk_distill` stage and HF probes (attention interface, `dtype=` loading).
 hf = ["transformers>=4.56", "safetensors"]
 dev = ["pytest", "ruff", "jsonschema"]
+# The mlx backend (Apple Silicon; also runs on Linux CPUs with `mlx[cpu]`).
+mlx = ["mlx>=0.25"]
 
 [project.scripts]
 modelbuilder-train = "modelbuilder_train.cli:main"

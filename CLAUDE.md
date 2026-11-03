@@ -91,7 +91,7 @@ npm run dev                                  # Vite on :5173, proxies /api to `s
 UPDATE_TYPES=1 cargo test -p mb-server --test types   # regenerate web/src/api/types.ts after changing API types
 
 # Python side (python/): once, then lint and test
-python -m venv python/.venv && python/.venv/bin/pip install -e "python[torch,dev,hf]"
+python -m venv python/.venv && python/.venv/bin/pip install -e "python[torch,dev,hf]"   # + "mlx[cpu]" for the mlx tests on Linux
 cd python && .venv/bin/ruff check . && .venv/bin/ruff format --check . && .venv/bin/pytest -q
 python -m modelbuilder_train extract-features --llama-bin <fork>/build/bin --model <target.gguf> --texts texts.jsonl --out <dir>
 python -m modelbuilder_train probe perplexity|needle|kv-cache|hf-vs-gguf ...
@@ -215,7 +215,9 @@ TOML), Jobs (start or follow a job, live curves over SSE).
   weights are fake-quantized through their source format, optionally as a
   LoRA update merged inside the parametrization (`hf/`). One device per
   process for now; FSDP or a model-parallel trunk is planned.
-- `mlx`: Apple Silicon, planned.
+- `mlx` ✅ (partial): `mtp_align` with the head in MLX
+  (`mtp/mlx_model.py`, `backends/mlx_backend.py`), checked against the
+  PyTorch head. Other stages run on the `torch` backend (MPS on Apple GPUs).
 - `backends/torchtitan`: multi-node continued pretraining, planned.
 
 The Python side also runs behavioral probes and evals.

@@ -94,7 +94,7 @@ class JobSpec(_Strict):
     schema_version: Literal[1]
     job_id: str = Field(min_length=1)
     created_by: str | None = None
-    backend: Literal["torch"]
+    backend: Literal["torch", "mlx"]
     device: Literal["auto", "cpu", "cuda", "mps"]
     hardware_profile: str | None = None
     output_dir: str = Field(min_length=1)

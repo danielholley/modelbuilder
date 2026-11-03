@@ -71,6 +71,9 @@ speculative decoding and **DeepSeek-V4.1-Flash-style KV cache changes**.
   have runners.
 - **LoRA in the cost model**: a `with_lora` fit tier, priced per profile,
   before the packed-trunk tier.
+- **The `mlx` backend** (Apple Silicon): `mtp_align` with the head in MLX,
+  matching the PyTorch head to 1e-4 and writing the same `mtp.*` output;
+  `job mtp-align --backend mlx`. Tested in CI with `mlx[cpu]` on Linux.
 
 ### Commands that work today
 
@@ -108,7 +111,7 @@ python -m modelbuilder_train generate-corpus | extract-features | run | validate
 
 ### Test coverage
 
-104 Rust tests, 68 Python tests (including end-to-end runs through the Rust
+104 Rust tests, 72 Python tests (including end-to-end runs through the Rust
 binary on fixtures: MTP alignment, KV QAT, MLA recovery, healing a pruned
 model against its original, LoRA write-back, draft heads) and 7 web tests,
 all in CI. Every test uses tiny synthetic checkpoints; nothing downloads a
@@ -138,9 +141,9 @@ These need hardware, data or runtime code that isn't in this repository:
   public reference code to follow.
 - **MLA RoPE-dimension choice by query/key norms** (MHA2MLA's best variant)
   needs calibration activations; only the data-free choices exist.
-- **Backends**: `mlx` (Apple Silicon runs the torch backend on MPS today) and
-  a multi-node pretraining backend (`torchtitan`), which continued
-  pretraining at upcycling scale needs. The `hf` stage runs on one device
+- **Backends**: `mlx` runs `mtp_align` only (other stages use torch on MPS),
+  and there is no multi-node pretraining backend (`torchtitan`), which
+  continued pretraining at upcycling scale needs. The `hf` stage runs on one device
   per process (DDP over gradients); there is no FSDP or model-parallel trunk
   yet, so a 27B trunk needs one device that holds it.
 

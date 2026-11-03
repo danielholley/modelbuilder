@@ -65,6 +65,9 @@ pub struct MtpAlignArgs {
     /// Train the head from random initialization instead of the reference's head.
     #[arg(long)]
     from_scratch: bool,
+    /// torch (CUDA, MPS or CPU) or mlx (Apple Silicon).
+    #[arg(long, default_value = "torch")]
+    backend: String,
     #[arg(long, default_value = "auto")]
     device: String,
     /// Hardware profile to record in the spec (see `modelbuilder features`).
@@ -355,7 +358,12 @@ fn mtp_align(a: MtpAlignArgs) -> Result<()> {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default()
     );
-    let spec = mb_jobs::mtp_align_spec(MtpAlignInputs {
+    let backend = match a.backend.as_str() {
+        "torch" => mb_jobs::Backend::Torch,
+        "mlx" => mb_jobs::Backend::Mlx,
+        b => bail!("unknown backend {b}; use torch or mlx"),
+    };
+    let mut spec = mb_jobs::mtp_align_spec(MtpAlignInputs {
         job_id,
         // Paths inside the run directory stay relative, so it can be moved.
         output_dir: ".".into(),
@@ -373,6 +381,7 @@ fn mtp_align(a: MtpAlignArgs) -> Result<()> {
         device,
         hyper,
     });
+    spec.backend = backend;
     let spec_path = out.join("job.json");
     spec.write(&spec_path)?;
     println!("wrote {}", spec_path.display());

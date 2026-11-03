@@ -26,8 +26,10 @@
     },
     "backend": {
       "enum": [
-        "torch"
-      ]
+        "torch",
+        "mlx"
+      ],
+      "description": "torch runs every stage kind; mlx runs mtp_align on Apple Silicon."
     },
     "device": {
       "enum": [

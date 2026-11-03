@@ -1,8 +1,9 @@
 """Training backends. A backend runs the stages of a job spec.
 
-Only ``torch`` exists so far. It runs frozen-trunk stages from precomputed
-trunk features, which makes it independent of how the trunk is stored
-(e.g. PrismML's ternary GGUF, which PyTorch can't load directly).
+``torch`` runs every stage kind: frozen-trunk stages from precomputed trunk
+features (independent of how the trunk is stored, e.g. PrismML's ternary
+GGUF), and ``trunk_distill`` on an HF export. ``mlx`` runs ``mtp_align`` with
+MLX on Apple Silicon (``pip install -e "python[mlx]"``).
 """
 
 from __future__ import annotations
@@ -53,4 +54,10 @@ def run_torch(spec: JobSpec, spec_dir: Path, ev: EventWriter) -> dict[str, str]:
     return outputs
 
 
-BACKENDS = {"torch": run_torch}
+def run_mlx(spec: JobSpec, spec_dir: Path, ev: EventWriter) -> dict[str, str]:
+    from modelbuilder_train.backends.mlx_backend import run_mlx as run
+
+    return run(spec, spec_dir, ev)
+
+
+BACKENDS = {"torch": run_torch, "mlx": run_mlx}

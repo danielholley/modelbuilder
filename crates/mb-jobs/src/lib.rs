@@ -52,6 +52,8 @@ pub struct JobSpec {
 #[serde(rename_all = "snake_case")]
 pub enum Backend {
     Torch,
+    /// MLX on Apple Silicon (`mtp_align` only).
+    Mlx,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -273,6 +275,12 @@ impl JobSpec {
             return bad("no stages".into());
         }
         for s in &self.stages {
+            if self.backend == Backend::Mlx && s.kind != StageKind::MtpAlign {
+                return bad(format!(
+                    "stage {}: the mlx backend runs mtp_align only (use torch)",
+                    s.name
+                ));
+            }
             let h = &s.hyper;
             if h.lr.is_nan()
                 || h.lr <= 0.0
