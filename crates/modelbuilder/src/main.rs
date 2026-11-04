@@ -251,6 +251,9 @@ enum SurgeryOp {
         /// Trained tensors (the `updates/` of an MLA trunk-distill run).
         #[arg(long)]
         updates: Option<PathBuf>,
+        /// Type of the latent projections: f32, f16, bf16 or q8_0.
+        #[arg(long, default_value = "f32")]
+        latent_type: String,
         #[arg(long, short = 'o')]
         out: PathBuf,
         #[arg(long)]
@@ -554,6 +557,7 @@ fn main() -> Result<()> {
                     target,
                     mla,
                     updates,
+                    latent_type,
                     out,
                     force,
                 },
@@ -562,7 +566,17 @@ fn main() -> Result<()> {
                 .with_context(|| format!("opening {}", target.display()))?;
             let ir = ModelIr::from_raw(t.raw.clone());
             let u = updates.as_deref().map(mb_formats::open).transpose()?;
-            let report = mb_surgery::mla::write_gguf(&t, &ir, &mla, u.as_ref(), &out, force)?;
+            let latent = match latent_type.to_ascii_lowercase().as_str() {
+                "f32" => mb_ir::DType::F32,
+                "f16" => mb_ir::DType::F16,
+                "bf16" => mb_ir::DType::Bf16,
+                "q8_0" => mb_ir::DType::Ggml(mb_ir::GgmlType(8)),
+                other => {
+                    anyhow::bail!("unsupported latent type {other}; use f32, f16, bf16 or q8_0")
+                }
+            };
+            let report =
+                mb_surgery::mla::write_gguf(&t, &ir, &mla, u.as_ref(), latent, &out, force)?;
             print!("{}", render::surgery(&report));
         }
         Command::Surgery {

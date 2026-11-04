@@ -508,16 +508,41 @@ pub fn convert(
 /// `surgery mla` output (its `config.json` and `mla.safetensors`); `updates`,
 /// if given, holds trained latent tensors (from `job trunk-distill
 /// --mla-rank`) that replace the initial ones. Other tensors are copied byte
-/// for byte.
+/// for byte. `latent` is the type of the three projections (`kv_a`, `kv_b`,
+/// `k_rope`): F32, F16, BF16 or Q8_0 (rows a multiple of 32); the small
+/// vectors and the permutation stay F32. They are primal (no Hadamard
+/// rotation), like the source K/V they replace after decoding.
 pub fn write_gguf(
     model: &LoadedModel,
     ir: &mb_ir::ModelIr,
     mla_dir: &Path,
     updates: Option<&LoadedModel>,
+    latent_type: DType,
     out: &Path,
     overwrite: bool,
 ) -> Result<crate::SurgeryReport, SurgeryError> {
     use mb_ir::{MetaType, MetaValue, Metadata};
+    let q8 = DType::Ggml(mb_ir::GgmlType(8));
+    if !matches!(latent_type, DType::F32 | DType::F16 | DType::Bf16) && latent_type != q8 {
+        return Err(SurgeryError::Unsupported(format!(
+            "latent type {latent_type}: use F32, F16, BF16 or Q8_0"
+        )));
+    }
+    let encode = |m: &DMatrix<f64>| -> Result<Vec<u8>, SurgeryError> {
+        if latent_type == q8 && m.ncols() % 32 != 0 {
+            return Err(SurgeryError::Incompatible(format!(
+                "Q8_0 needs rows of a multiple of 32 values, the latent has {}",
+                m.ncols()
+            )));
+        }
+        let row_major: Vec<f32> = (0..m.nrows())
+            .flat_map(|i| (0..m.ncols()).map(move |j| m[(i, j)] as f32))
+            .collect();
+        let mut out = Vec::new();
+        mb_formats::quant::quantize(latent_type, &row_major, &mut out)
+            .map_err(|e| SurgeryError::Unsupported(e.to_string()))?;
+        Ok(out)
+    };
     let (mut kv, arch) = crate::gguf_edit::gguf_kv(ir)?;
     crate::gguf_edit::check_output(ir, out, overwrite)?;
     let cfg: Value = serde_json::from_str(
@@ -637,20 +662,20 @@ pub fn write_gguf(
                 (
                     b("attn_mla_kv_a.weight"),
                     shape(&kv_a),
-                    DType::F32,
-                    f32_bytes(&kv_a),
+                    latent_type,
+                    encode(&kv_a)?,
                 ),
                 (
                     b("attn_mla_kv_b.weight"),
                     shape(&kv_b),
-                    DType::F32,
-                    f32_bytes(&kv_b),
+                    latent_type,
+                    encode(&kv_b)?,
                 ),
                 (
                     b("attn_mla_k_rope.weight"),
                     shape(&k_rope),
-                    DType::F32,
-                    f32_bytes(&k_rope),
+                    latent_type,
+                    encode(&k_rope)?,
                 ),
                 (
                     b("attn_mla_k_rope_norm.weight"),
@@ -780,7 +805,7 @@ pub fn write_gguf(
         metadata: vec![format!("{arch}.attention.mla_rank / mla_rope_dim / mla_rope_freqs")],
         notes: vec![
             format!("{} layers cache {} values per token instead of {}.", layers.len(), rank + n_kv * (r + 1), 2 * n_kv * hd),
-            "Runs with patches/prism-llama.cpp/ 0003 (qwen35 graphs) and 0005 (qwen3 graphs). The latent tensors are F32; quantizing them is future work.".into(),
+            format!("Runs with patches/prism-llama.cpp/ 0003 (qwen35 graphs) and 0005 (qwen3 graphs). Latent projections stored as {latent_type}."),
         ],
     })
 }

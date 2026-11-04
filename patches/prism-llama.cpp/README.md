@@ -77,7 +77,8 @@ them into the GGUF. Design and cache layout: `0003-mla-design.md`. Per converted
 layer the cache holds `[latent | roped, weighted RoPE key | ||RoPE key||² per
 head]`; K and V are decompressed from it each step, K RMSNorm is finished from
 the stored norm, and Q is permuted into the cached head order. `qwen35` graphs
-only; F32 latent tensors.
+only (0005 adds `qwen3`); latent projections F32, F16, BF16 or Q8_0
+(`mla-gguf --latent-type`).
 
 Checked on Qwen3.5-0.8B (6 attention layers; 2 KV heads × 256, 64 rotary
 dims), 2026-11-04:

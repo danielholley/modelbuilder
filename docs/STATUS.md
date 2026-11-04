@@ -197,7 +197,7 @@ python -m modelbuilder_train generate-corpus | extract-features | run | validate
 
 ### Test coverage
 
-106 Rust tests, 92 Python tests (including end-to-end runs through the Rust
+107 Rust tests, 94 Python tests (including end-to-end runs through the Rust
 binary on fixtures: MTP alignment, KV QAT, MLA recovery, healing a pruned
 model against its original, LoRA write-back, draft heads) and 7 web tests,
 all in CI. Every test uses tiny synthetic checkpoints; nothing downloads a
@@ -216,8 +216,11 @@ These need hardware, data or runtime code that isn't in this repository:
     `llama` graphs (the `llama` graph is untested on a real model);
     upstreaming it, and other architectures' graphs, are open;
   - MLA runs with patches 0003 and 0005 for `qwen35` and `qwen3` graphs
-    (`llama` has no K norm, which the cache layout assumes; F32 latent tensors;
-    quantizing them in the source format is open);
+    (`llama` has no K norm, which the cache layout assumes). The latent
+    projections are F32 by default; `mla-gguf --latent-type f16|bf16|q8_0`
+    stores them smaller (Qwen3-0.6B at full rank: Q8_0 0.9989 / 96.3% and F16
+    0.9990 / 96.1% against PyTorch, vs 0.9990 / 96.3% for F32). Ternary
+    latents (PQ2_0) would need QAT of the latent and are open;
   - Medusa/EAGLE-1 heads in GGUF: the drafters are written as safetensors
     for runtimes that load them (e.g. vLLM).
 - **Upcycling at scale:** checked in llama.cpp on Qwen3-0.6B and a pruned

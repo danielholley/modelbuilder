@@ -198,3 +198,35 @@ def test_rope_scores_find_the_frequencies_attention_uses(tmp_path: Path) -> None
     bad = mb("surgery", "mla", str(src), "--kv-rank", "8", "--rope-dim", "4", "--freqs", "1,9", "-o",
              str(tmp_path / "b"), check=False)  # fmt: skip
     assert "distinct indices" in bad
+
+
+def test_mla_gguf_writes_the_latent_in_the_requested_type(tmp_path: Path) -> None:
+    from safetensors.numpy import load_file
+
+    target = Path(mb("fixture", "gguf-qwen3", str(tmp_path / "t")).strip())
+    mb("export-hf", str(target), "--reference", str(target.parent), "--dtype", "f32", "-o", str(tmp_path / "hf"))
+    mla = tmp_path / "mla"
+    mb("surgery", "mla", str(tmp_path / "hf"), "--kv-rank", "32", "--rope-dim", "4", "-o", str(mla))
+    latent = {}
+    stored = {"f32": "f32", "q8_0": {"ggml": 8}}  # how `inspect --json` names the types
+    for kind in ["f32", "q8_0"]:
+        out = tmp_path / f"{kind}.gguf"
+        mb("surgery", "mla-gguf", str(target), "--mla", str(mla), "--latent-type", kind, "-o", str(out))
+        tensors = {
+            t["info"]["name"]: t["info"]["dtype"]
+            for t in json.loads(mb("inspect", str(out), "--tensors", "--json"))["tensors"]
+        }
+        assert "blk.0.attn_k.weight" not in tensors and "blk.0.attn_v.weight" not in tensors
+        for n in ["attn_mla_kv_a", "attn_mla_kv_b", "attn_mla_k_rope"]:
+            assert tensors[f"blk.1.{n}.weight"] == stored[kind], tensors
+        assert tensors["blk.1.attn_mla_perm.weight"] == "f32"
+        dump = tmp_path / f"{kind}.safetensors"
+        mb("export-tensors", str(out), "--names", "blk.1.attn_mla_kv_b.weight", "--dtype", "f32", "-o", str(dump))
+        latent[kind] = next(iter(load_file(str(dump)).values()))
+    err = abs(latent["q8_0"] - latent["f32"]).max() / abs(latent["f32"]).max()
+    assert 0 < err < 1e-2, err
+    # Q8_0 blocks are 32 values: a rank-16 latent's kv_b rows don't fit.
+    mb("surgery", "mla", str(tmp_path / "hf"), "--kv-rank", "16", "--rope-dim", "4", "-o", str(tmp_path / "m16"))
+    bad = mb("surgery", "mla-gguf", str(target), "--mla", str(tmp_path / "m16"), "--latent-type", "q8_0",
+             "-o", str(tmp_path / "bad.gguf"), check=False)  # fmt: skip
+    assert "multiple of 32" in bad, bad
