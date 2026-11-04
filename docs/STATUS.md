@@ -172,6 +172,12 @@ python -m modelbuilder_train generate-corpus | extract-features | run | validate
   on the pruned 8-layer Bonsai the cache halves, and the runtime matches the
   PyTorch model with the same sharing at cosine 0.99996 / 99.05% top-1 (the
   unshared control: 0.972 / 79.8%).
+- **DSpark in llama.cpp** (patch 0002): a drafter trained against
+  Qwen3.5-0.8B by `job draft-align --kind dspark`, converted with the fork's
+  converter, drafts in `llama-speculative-simple --spec-type draft-dspark`;
+  acceptance 5.6% after 200 CPU training steps, matching its training top-1.
+  The unpatched fork can't run any DSpark drafter (DeepSeek's own included):
+  nothing enabled target-layer capture.
 - **Dashboards:** the web UI was driven in a browser on the real GGUF. A
   training run was started from the Jobs page and followed to completion. The
   TUI was run in a real terminal on the model and on a training job.
@@ -212,9 +218,8 @@ These need hardware, data or runtime code that isn't in this repository:
 
 1. Run the real-model checks above on the cluster (item 6 and 8 of the
    revised order below).
-2. Run upcycled fixtures in llama.cpp (logits equal to the dense model's),
-   including the `qwen35moe` loader, and convert and run a trained DSpark
-   drafter with the fork (`--spec-type draft-dspark`).
+2. Train a DSpark drafter at scale on GPUs and measure its speedup; port
+   patch 0002's prompt-row fix to `llama-server`.
 3. Run `trunk_distill --device-map auto` and `--shard fsdp` on real GPUs.
 
 ## Target hardware (the user's cluster)

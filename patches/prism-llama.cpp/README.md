@@ -43,10 +43,22 @@ sharing gives cosine 0.99996 (min 0.99972) and 99.05% top-1 agreement over
 At the fork commit above, nothing calls `llama_set_capture_layers`, so
 `--spec-type draft-dspark` fails on the first speculative batch for every
 checkpoint ("llama_get_embeddings_capture_ith(0) returned null"), including
-DeepSeek's published `deepseek-ai/dspark_qwen3_4b_block7`. The patch adds
-`llama_model_dspark_get_target_layers` and has the DSpark host loop enable
-capture of the drafter's tap layers on the target context. Two more limits of
-the fork, found the same way and not patched:
+DeepSeek's published `deepseek-ai/dspark_qwen3_4b_block7`. The patch:
+
+- adds `llama_model_dspark_get_target_layers`, and the DSpark host loop enables
+  capture of the drafter's tap layers on the target context;
+- `llama-speculative-simple`: for DSpark, outputs every prompt row (the
+  drafter reads the taps of all of them), raises the output limit to the
+  batch, and calls `common_speculative_begin` before processing the prompt
+  (DSpark's `begin()` clears the context that `process()` stages).
+
+With it, a DSpark drafter trained by `modelbuilder job draft-align --kind
+dspark` against Qwen3.5-0.8B (200 CPU steps), converted with the fork's
+`convert_hf_to_gguf.py --target-model-dir`, drafts in `llama-speculative-simple
+--spec-type draft-dspark --no-repack`: 485 tokens drafted, 27 accepted (5.6%),
+matching the drafter's 5–7% top-1 in training. `llama-server` still doesn't
+output prompt rows for DSpark (same fix needed in its batch construction).
+Two more limits of the fork, found the same way and not patched:
 
 - Only `qwen35` target graphs produce capture tensors, so DSpark targets must
   be Qwen3.5-family models (as PrismML's shipped drafters are).
@@ -54,4 +66,4 @@ the fork, found the same way and not patched:
   calls a null function and crashes (`llama_model_dspark_get_markov`); run with
   `--no-repack`.
 
-Patches 0001 and 0002 apply together, in either order.
+Apply 0001, then 0002 (0002 is a diff on top of 0001).

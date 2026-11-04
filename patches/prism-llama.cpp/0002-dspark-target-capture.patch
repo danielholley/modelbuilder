@@ -20,6 +20,53 @@ index 76c7e6f..405d2a8 100644
          n_embd        = meta.n_embd;
          n_vocab       = meta.n_vocab;
          n_capture     = meta.n_capture;
+diff --git a/examples/speculative-simple/speculative-simple.cpp b/examples/speculative-simple/speculative-simple.cpp
+index b4f2216..fe51bea 100644
+--- a/examples/speculative-simple/speculative-simple.cpp
++++ b/examples/speculative-simple/speculative-simple.cpp
+@@ -35,6 +35,15 @@ int main(int argc, char ** argv) {
+     params.n_outputs_max = output_limits.total;
+     params.n_outputs_max_per_seq = output_limits.per_seq;
+ 
++    // DSpark reads the target's tapped layers for every prompt row, so the prompt
++    // batch outputs every row
++    for (auto t : params.speculative.types) {
++        if (t == COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK) {
++            params.n_outputs_max = params.n_batch;
++            params.n_outputs_max_per_seq = params.n_batch;
++        }
++    }
++
+     // init llama.cpp
+     llama_backend_init();
+     llama_numa_init(params.numa);
+@@ -130,8 +139,14 @@ int main(int argc, char ** argv) {
+     // eval the prompt on the target and feed it to the speculative implementation(s)
+     {
+         common_batch batch_prompt(ctx_tgt);
++        // drafters that read the target's tapped layers (DSpark) need them for every prompt row,
++        // and stage them in process(), so their begin() (which resets that state) comes first
++        const bool all_rows = common_speculative_need_embd_capture(spec);
++        if (all_rows) {
++            common_speculative_begin(spec, seq_id, llama_tokens(inp.begin(), inp.end() - 1));
++        }
+         for (size_t i = 0; i < inp.size() - 1; ++i) {
+-            batch_prompt.add(inp[i], i, seq_id, false);
++            batch_prompt.add(inp[i], i, seq_id, all_rows);
+         }
+ 
+         llama_process(ctx_tgt, LLAMA_PROCESS_TYPE_DECODE, batch_prompt.get());
+@@ -151,7 +166,9 @@ int main(int argc, char ** argv) {
+ 
+     int n_past = inp.size() - 1;
+ 
+-    common_speculative_begin(spec, seq_id, prompt_tgt);
++    if (!common_speculative_need_embd_capture(spec)) {
++        common_speculative_begin(spec, seq_id, prompt_tgt);
++    }
+ 
+     common_batch batch_tgt(ctx_tgt);
+ 
 diff --git a/src/llama-ext.h b/src/llama-ext.h
 index e50b30e..5feae74 100644
 --- a/src/llama-ext.h
@@ -36,10 +83,10 @@ index e50b30e..5feae74 100644
  // VanillaMarkov in the DeepSpec reference) is supported here: it's the only
  // variant present in shipped GGUFs today -- gated/rnn markov heads carry
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
-index 14ecc84..d50af9d 100644
+index c07b9a7..fb934ac 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
-@@ -3870,6 +3870,17 @@ ggml_backend_dev_t llama_model_get_device(const struct llama_model * model, int
+@@ -3882,6 +3882,17 @@ ggml_backend_dev_t llama_model_get_device(const struct llama_model * model, int
      return model->devices[i].dev;
  }
  
