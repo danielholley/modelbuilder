@@ -75,6 +75,8 @@ cargo run --release -- surgery prune <model.gguf> --layers a..b -o new.gguf
 cargo run --release -- surgery yarn <model.gguf> --factor 4 -o new.gguf
 cargo run --release -- surgery upcycle <model.gguf> --experts 8 --top-k 2 -o new.gguf   # llama, qwen3, qwen35
 cargo run --release -- surgery mla <hf-dir> --kv-rank 512 --rope-dim 32 -o <mla-dir>
+cargo run --release -- surgery mla-gguf <model.gguf> --mla <mla-dir> [--updates <dir>] -o new.gguf   # for patches/prism-llama.cpp
+cargo run --release -- surgery kv-share <model.gguf> --group 2 -o new.gguf                          # ditto
 cargo run --release -- job trunk-distill <model.gguf> --reference <hf-dir> --texts t.jsonl --kv-format q4_0 -o runs/<name>
 #   also: --kv-share-group N | --mla-rank R | --teacher <orig.gguf> | --loss ce | --lora-rank r | --trainable a,b
 cargo run --release -- job draft-align <target.gguf> --kind medusa|eagle --features <dir> [--reference <hf-dir>] -o runs/<name>

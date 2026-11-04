@@ -1,7 +1,11 @@
 # Design: running `surgery mla` checkpoints in the fork
 
-Status: design only. Cross-layer KV sharing (patch 0001) is implemented and
-checked; MLA is not, because it needs a new attention path, not a cache map.
+Status: implemented as `0003-mla.patch`, following this design, with two
+changes: Q is permuted into the cached `[rope; nope]` head order by a constant
+matrix (`attn_mla_perm`) instead of permuting weights offline, and the kept
+RoPE frequencies come from per-layer frequency-factor tensors (Q: a huge factor
+switches a frequency off; K: factors map the r-dim NeoX rope onto the kept
+frequencies). The V cache row is 1 wide (zeros) so the cache stays uniform.
 
 ## What has to run
 

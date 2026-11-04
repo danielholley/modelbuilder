@@ -286,7 +286,8 @@ def hf_vs_gguf(
     still in float32, at bf16 precision. With ``kv_share_group`` the HF model
     shares K/V across groups of attention layers as ``trunk_distill`` trains it,
     to check a GGUF marked by ``modelbuilder surgery kv-share`` in a runtime
-    that implements the sharing.
+    that implements the sharing. An ``hf_dir`` from ``modelbuilder surgery mla``
+    runs as its latent-attention student, to check ``surgery mla-gguf`` output.
     """
     import torch
     from transformers import AutoModelForCausalLM
@@ -307,6 +308,15 @@ def hf_vs_gguf(
     else:
         model = AutoModelForCausalLM.from_pretrained(hf_dir, dtype=getattr(torch, dtype)).to(dev)
     model.eval()
+    from modelbuilder_train.hf import mla
+
+    mla_cfg = mla.load_config(hf_dir)
+    if mla_cfg is not None:  # an MLA conversion: compare the latent-attention model it describes
+
+        class _Student:
+            student = True
+
+        mla.attach(model, hf_dir, mla_cfg, _Student())
     head = model.get_output_embeddings()
     cos_all, err, norm, agree, n = [], 0.0, 0.0, 0, 0
     with torch.no_grad():

@@ -239,6 +239,23 @@ enum SurgeryOp {
         #[arg(long)]
         force: bool,
     },
+    /// Write an MLA conversion (`surgery mla`, optionally trained with
+    /// `job trunk-distill --mla-rank`) into a copy of the GGUF it came from,
+    /// for the fork patch in patches/prism-llama.cpp/ (qwen35 graphs).
+    MlaGguf {
+        /// The GGUF the HF checkpoint was exported from.
+        target: PathBuf,
+        /// The `surgery mla` output directory.
+        #[arg(long)]
+        mla: PathBuf,
+        /// Trained tensors (the `updates/` of an MLA trunk-distill run).
+        #[arg(long)]
+        updates: Option<PathBuf>,
+        #[arg(long, short = 'o')]
+        out: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
     /// Enable YaRN RoPE scaling in a GGUF's metadata (context × factor).
     Yarn {
         target: PathBuf,
@@ -529,6 +546,23 @@ fn main() -> Result<()> {
                 .with_context(|| format!("opening {}", target.display()))?;
             let ir = ModelIr::from_raw(t.raw.clone());
             let report = mb_surgery::gguf_edit::set_kv_share(&t, &ir, group, &out, force)?;
+            print!("{}", render::surgery(&report));
+        }
+        Command::Surgery {
+            op:
+                SurgeryOp::MlaGguf {
+                    target,
+                    mla,
+                    updates,
+                    out,
+                    force,
+                },
+        } => {
+            let t = mb_formats::open(&target)
+                .with_context(|| format!("opening {}", target.display()))?;
+            let ir = ModelIr::from_raw(t.raw.clone());
+            let u = updates.as_deref().map(mb_formats::open).transpose()?;
+            let report = mb_surgery::mla::write_gguf(&t, &ir, &mla, u.as_ref(), &out, force)?;
             print!("{}", render::surgery(&report));
         }
         Command::Surgery {

@@ -178,6 +178,11 @@ python -m modelbuilder_train generate-corpus | extract-features | run | validate
   acceptance 5.6% after 200 CPU training steps, matching its training top-1.
   The unpatched fork can't run any DSpark drafter (DeepSeek's own included):
   nothing enabled target-layer capture.
+- **MLA in llama.cpp** (patch 0003, `surgery mla-gguf`): Qwen3.5-0.8B
+  converted at full rank keeps its perplexity (47.4867 vs 47.4850); at rank 256
+  with 32 RoPE dims the KV cache shrinks 3.2× (24.00 → 7.59 MiB at 1,024
+  tokens) and the runtime matches the PyTorch MLA model at cosine 1.000000 and
+  100% top-1.
 - **Dashboards:** the web UI was driven in a browser on the real GGUF. A
   training run was started from the Jobs page and followed to completion. The
   TUI was run in a real terminal on the model and on a training job.
@@ -201,8 +206,8 @@ These need hardware, data or runtime code that isn't in this repository:
 - **Runtime support** that lives in llama.cpp (or the PrismML fork), not here:
   - KV sharing runs with the patch in `patches/prism-llama.cpp/` (qwen35
     graphs); upstreaming it, and other architectures' graphs, are open;
-  - MLA outside DeepSeek's architecture: a converted model stays in HF form
-    (design for the fork in `patches/prism-llama.cpp/mla-runtime-design.md`);
+  - MLA runs with patch 0003 for `qwen35` graphs (F32 latent tensors;
+    quantizing them in the source format is open);
   - Medusa/EAGLE-1 heads in GGUF: the drafters are written as safetensors
     for runtimes that load them (e.g. vLLM).
 - **Upcycling at scale:** checked in llama.cpp on Qwen3-0.6B and a pruned

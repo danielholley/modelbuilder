@@ -68,4 +68,25 @@ Two more limits of the fork, found the same way and not patched:
   calls a null function and crashes (`llama_model_dspark_get_markov`); run with
   `--no-repack`.
 
-Apply 0001, then 0002 (0002 is a diff on top of 0001).
+## 0003: multi-head latent attention (MLA) converted from GQA
+
+Runs checkpoints from `modelbuilder surgery mla` (optionally trained with
+`job trunk-distill --mla-rank`) after `modelbuilder surgery mla-gguf` writes
+them into the GGUF. Design and cache layout: `0003-mla-design.md`. Per converted
+layer the cache holds `[latent | roped, weighted RoPE key | ||RoPE key||² per
+head]`; K and V are decompressed from it each step, K RMSNorm is finished from
+the stored norm, and Q is permuted into the cached head order. `qwen35` graphs
+only; F32 latent tensors.
+
+Checked on Qwen3.5-0.8B (6 attention layers; 2 KV heads × 256, 64 rotary
+dims), 2026-11-04:
+
+- full rank (896, all 64 RoPE dims; exact by construction): perplexity
+  47.4867 vs 47.4850 for the original GGUF;
+- rank 256 with 32 RoPE dims per head: KV cache 24.00 → 7.59 MiB at 1,024
+  tokens (1,024 → 322 values per token and layer), and the runtime matches
+  the PyTorch MLA model (`hf/mla.py`) token by token: cosine 1.000000 (min
+  0.999996), 100% top-1 over 1,266 tokens. Against the unconverted model:
+  0.969 and 80.1%.
+
+Apply 0001, 0002, then 0003 (each a diff on top of the previous one).

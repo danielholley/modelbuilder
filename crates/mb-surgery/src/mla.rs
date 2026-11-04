@@ -272,6 +272,10 @@ pub fn convert(
         .tensors
         .iter()
         .filter_map(|x| {
+            // trunk layers only: an MTP block (`mtp.layers.N`) isn't converted
+            if x.name.starts_with("mtp.") || x.name.contains(".mtp.") {
+                return None;
+            }
             let prefix = x.name.strip_suffix("k_proj.weight")?;
             let before = prefix.strip_suffix("self_attn.")?;
             let idx = before.strip_suffix('.')?.rsplit('.').next()?.parse().ok()?;
@@ -423,6 +427,23 @@ pub fn convert(
         if name == "config.json" || name == TENSORS_FILE || !e.path().is_file() {
             continue;
         }
+        if name == "model.safetensors.index.json" {
+            // the shard index lists the latent too, so the directory reads as one checkpoint
+            let mut idx: Value =
+                serde_json::from_str(&std::fs::read_to_string(e.path()).map_err(io)?)
+                    .map_err(|e| SurgeryError::Incompatible(format!("shard index: {e}")))?;
+            if let Some(map) = idx.get_mut("weight_map").and_then(Value::as_object_mut) {
+                for (n, _, _) in &tensors {
+                    map.insert(n.clone(), json!(TENSORS_FILE));
+                }
+            }
+            std::fs::write(
+                out.join(&name),
+                serde_json::to_string_pretty(&idx).expect("json"),
+            )
+            .map_err(io)?;
+            continue;
+        }
         link(&e.path(), &out.join(&name)).map_err(io)?;
     }
     let mla = json!({
@@ -474,6 +495,292 @@ pub fn convert(
             format!("RoPE kept on {r} of {rot} rotary dimensions per head ({select:?} selection); the rest lose RoPE in Q and K."),
             "Original weights are linked, not copied: they are the teacher for recovery training (`trunk_distill` with trainable `self_attn.mla.`).".into(),
             "No runtime runs this layout yet: llama.cpp and vLLM run MLA only in DeepSeek's architecture.".into(),
+        ],
+    })
+}
+
+/// Writes an MLA conversion into a copy of the GGUF it came from, in the
+/// layout of the fork patch `patches/prism-llama.cpp/0003-mla.patch`: for
+/// each converted layer the latent projections (`attn_mla_kv_a`, `_kv_b`,
+/// `_k_rope`, F32), the K-norm weights split into RoPE and other dims, the
+/// head permutation `[rope dims; nope dims]` applied to Q, and RoPE frequency
+/// factors, with `attn_k`/`attn_v`/`attn_k_norm` removed. `mla_dir` is a
+/// `surgery mla` output (its `config.json` and `mla.safetensors`); `updates`,
+/// if given, holds trained latent tensors (from `job trunk-distill
+/// --mla-rank`) that replace the initial ones. Other tensors are copied byte
+/// for byte.
+pub fn write_gguf(
+    model: &LoadedModel,
+    ir: &mb_ir::ModelIr,
+    mla_dir: &Path,
+    updates: Option<&LoadedModel>,
+    out: &Path,
+    overwrite: bool,
+) -> Result<crate::SurgeryReport, SurgeryError> {
+    use mb_ir::{MetaType, MetaValue, Metadata};
+    let (mut kv, arch) = crate::gguf_edit::gguf_kv(ir)?;
+    crate::gguf_edit::check_output(ir, out, overwrite)?;
+    let cfg: Value = serde_json::from_str(
+        &std::fs::read_to_string(mla_dir.join("config.json"))
+            .map_err(|e| SurgeryError::Incompatible(format!("{}: {e}", mla_dir.display())))?,
+    )
+    .map_err(|e| SurgeryError::Incompatible(e.to_string()))?;
+    let m = cfg
+        .get("text_config")
+        .and_then(|t| t.get(CONFIG_KEY))
+        .or_else(|| cfg.get(CONFIG_KEY))
+        .ok_or_else(|| {
+            SurgeryError::Incompatible(format!("{} has no {CONFIG_KEY}", mla_dir.display()))
+        })?;
+    let ints = |k: &str| -> Vec<usize> {
+        m[k].as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_u64())
+                    .map(|v| v as usize)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (layers, rope_dims, nope_dims, freqs) = (
+        ints("layers"),
+        ints("rope_dims"),
+        ints("nope_dims"),
+        ints("rope_freqs"),
+    );
+    let num = |k: &str| m[k].as_u64().unwrap_or(0) as usize;
+    let (rank, r, rot, hd, n_kv) = (
+        num("kv_rank"),
+        num("rope_dim"),
+        num("rotary_dim"),
+        num("head_dim"),
+        num("num_key_value_heads"),
+    );
+    if layers.is_empty() || r == 0 || rope_dims.len() != r || nope_dims.len() != hd - r {
+        return Err(SurgeryError::Incompatible(format!(
+            "{CONFIG_KEY} is incomplete"
+        )));
+    }
+    let latent = safetensors::open(mla_dir).ok();
+    let source = |name_end: &str| -> Result<DMatrix<f64>, SurgeryError> {
+        for src in updates.into_iter().chain(latent.as_ref()) {
+            if let Some(t) = src.raw.tensors.iter().find(|t| t.name.ends_with(name_end)) {
+                return matrix(src, &t.name);
+            }
+        }
+        Err(SurgeryError::Incompatible(format!(
+            "no tensor ending in {name_end}"
+        )))
+    };
+    let get_meta = |k: &str| match &ir.raw.metadata {
+        Metadata::Gguf { kv, .. } => kv.iter().find(|(x, _)| x == k).map(|(_, v)| v.clone()),
+        _ => None,
+    };
+    let base = match get_meta(&format!("{arch}.rope.freq_base")) {
+        Some(MetaValue::F32(f)) => f64::from(f),
+        Some(MetaValue::F64(f)) => f,
+        _ => 10_000.0,
+    };
+    let n_layers = get_meta(&format!("{arch}.block_count"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+
+    // per layer: (name, shape, type, bytes) of the tensors added
+    type Added = Vec<(String, Vec<u64>, DType, Vec<u8>)>;
+    let mut added: BTreeMap<u32, Added> = BTreeMap::new();
+    for &l in &layers {
+        let b = |s: &str| format!("blk.{l}.{s}");
+        let hfb = |s: &str| format!("layers.{l}.self_attn.mla.{s}");
+        if updates.is_some_and(|u| {
+            u.raw
+                .tensors
+                .iter()
+                .any(|t| t.name.ends_with(&hfb("kv_b.bias")))
+        }) || latent.as_ref().is_some_and(|u| {
+            u.raw
+                .tensors
+                .iter()
+                .any(|t| t.name.ends_with(&hfb("kv_b.bias")))
+        }) {
+            return Err(SurgeryError::Unsupported(
+                "K/V biases have no MLA runtime path yet".into(),
+            ));
+        }
+        let kv_a = source(&hfb("kv_a.weight"))?;
+        let kv_b = source(&hfb("kv_b.weight"))?;
+        let k_rope = source(&hfb("k_rope.weight"))?;
+        let k_norm: Vec<f64> = matrix(model, &b("attn_k_norm.weight"))?
+            .iter()
+            .copied()
+            .collect();
+        let vec_bytes =
+            |v: &[f64]| -> Vec<u8> { v.iter().flat_map(|&x| (x as f32).to_le_bytes()).collect() };
+        let order: Vec<usize> = rope_dims.iter().chain(&nope_dims).copied().collect();
+        let mut perm = DMatrix::zeros(hd, hd);
+        for (o, &i) in order.iter().enumerate() {
+            perm[(o, i)] = 1.0;
+        }
+        let ff_q: Vec<f64> = (0..rot / 2)
+            .map(|i| if freqs.contains(&i) { 1.0 } else { 1e30 })
+            .collect();
+        let ff_k: Vec<f64> = freqs
+            .iter()
+            .enumerate()
+            .map(|(j, &k)| {
+                base.powf(-2.0 * j as f64 / r as f64) / base.powf(-2.0 * k as f64 / rot as f64)
+            })
+            .collect();
+        let shape = |m: &DMatrix<f64>| vec![m.nrows() as u64, m.ncols() as u64];
+        added.insert(
+            l as u32,
+            vec![
+                (
+                    b("attn_mla_kv_a.weight"),
+                    shape(&kv_a),
+                    DType::F32,
+                    f32_bytes(&kv_a),
+                ),
+                (
+                    b("attn_mla_kv_b.weight"),
+                    shape(&kv_b),
+                    DType::F32,
+                    f32_bytes(&kv_b),
+                ),
+                (
+                    b("attn_mla_k_rope.weight"),
+                    shape(&k_rope),
+                    DType::F32,
+                    f32_bytes(&k_rope),
+                ),
+                (
+                    b("attn_mla_k_rope_norm.weight"),
+                    vec![r as u64],
+                    DType::F32,
+                    vec_bytes(&rope_dims.iter().map(|&d| k_norm[d]).collect::<Vec<_>>()),
+                ),
+                (
+                    b("attn_mla_k_nope_norm.weight"),
+                    vec![(hd - r) as u64],
+                    DType::F32,
+                    vec_bytes(&nope_dims.iter().map(|&d| k_norm[d]).collect::<Vec<_>>()),
+                ),
+                (
+                    b("attn_mla_perm.weight"),
+                    vec![hd as u64, hd as u64],
+                    DType::F32,
+                    f32_bytes(&perm),
+                ),
+                (
+                    b("attn_mla_ff_q.weight"),
+                    vec![(rot / 2) as u64],
+                    DType::F32,
+                    vec_bytes(&ff_q),
+                ),
+                (
+                    b("attn_mla_ff_k.weight"),
+                    vec![(r / 2) as u64],
+                    DType::F32,
+                    vec_bytes(&ff_k),
+                ),
+            ],
+        );
+        if kv_b.nrows() != n_kv * (hd - r) + n_kv * hd || kv_a.nrows() != rank {
+            return Err(SurgeryError::Incompatible(format!(
+                "layer {l}: latent shapes don't match {CONFIG_KEY}"
+            )));
+        }
+    }
+
+    let dropped = |name: &str| {
+        crate::gguf_edit::layer_of(name).is_some_and(|(l, rest)| {
+            added.contains_key(&l)
+                && matches!(
+                    rest,
+                    "attn_k.weight"
+                        | "attn_v.weight"
+                        | "attn_k_norm.weight"
+                        | "attn_k.bias"
+                        | "attn_v.bias"
+                )
+        })
+    };
+    for (_, v) in kv.iter_mut() {
+        if let MetaValue::Array { values, .. } = v {
+            values.retain(|x| !x.as_str().is_some_and(dropped));
+        }
+    }
+    let mut ranks = vec![0u32; n_layers.max(layers.iter().max().map_or(0, |l| l + 1))];
+    for &l in &layers {
+        ranks[l] = rank as u32;
+    }
+    crate::gguf_edit::set(
+        &mut kv,
+        &format!("{arch}.attention.mla_rank"),
+        MetaValue::Array {
+            elem: MetaType::U32,
+            values: ranks.iter().map(|&x| MetaValue::U32(x)).collect(),
+        },
+    );
+    crate::gguf_edit::set(
+        &mut kv,
+        &format!("{arch}.attention.mla_rope_dim"),
+        MetaValue::U32(r as u32),
+    );
+    crate::gguf_edit::set(
+        &mut kv,
+        &format!("{arch}.attention.mla_rope_freqs"),
+        MetaValue::Array {
+            elem: MetaType::I32,
+            values: freqs.iter().map(|&x| MetaValue::I32(x as i32)).collect(),
+        },
+    );
+
+    let mut tensors: Vec<TensorToWrite> = Vec::new();
+    let mut written = Vec::new();
+    for t in &ir.raw.tensors {
+        if dropped(&t.name) {
+            continue;
+        }
+        tensors.push(TensorToWrite {
+            name: t.name.clone(),
+            dtype: t.dtype,
+            shape: t.shape.clone(),
+            data: Cow::Borrowed(model.tensor_bytes(t)?),
+        });
+        if t.name.ends_with("attn_q_norm.weight") {
+            if let Some((l, _)) = crate::gguf_edit::layer_of(&t.name) {
+                for (name, shape, dtype, data) in added.get(&l).into_iter().flatten() {
+                    written.push(crate::WrittenTensor {
+                        name: name.clone(),
+                        dtype: dtype.to_string(),
+                        shape: shape.clone(),
+                        source: format!("mla:{}", mla_dir.display()),
+                        transform: "MLA latent layout".into(),
+                    });
+                    tensors.push(TensorToWrite {
+                        name: name.clone(),
+                        dtype: *dtype,
+                        shape: shape.clone(),
+                        data: Cow::Borrowed(data),
+                    });
+                }
+            }
+        }
+    }
+    if written.len() != added.values().map(Vec::len).sum::<usize>() {
+        return Err(SurgeryError::Incompatible(
+            "a converted layer has no attn_q_norm in the GGUF".into(),
+        ));
+    }
+    mb_formats::gguf::write(out, &kv, &tensors)?;
+    Ok(crate::SurgeryReport {
+        output: out.to_owned(),
+        bytes: std::fs::metadata(out).map_err(|e| SurgeryError::Output(e.to_string()))?.len(),
+        tensors: written,
+        metadata: vec![format!("{arch}.attention.mla_rank / mla_rope_dim / mla_rope_freqs")],
+        notes: vec![
+            format!("{} layers cache {} values per token instead of {}.", layers.len(), rank + n_kv * (r + 1), 2 * n_kv * hd),
+            "Runs with patches/prism-llama.cpp/0003 (qwen35 graphs). The latent tensors are F32; quantizing them is future work.".into(),
         ],
     })
 }
