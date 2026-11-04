@@ -121,8 +121,13 @@ class Server:
     def tokenize(self, text: str) -> list[int]:
         return self.post("/tokenize", {"content": text, "add_special": True, "parse_special": True})["tokens"]
 
-    def apply_template(self, messages: list[dict]) -> str:
-        return self.post("/apply-template", {"messages": messages})["prompt"]
+    def apply_template(self, messages: list[dict], thinking: bool | None = None) -> str:
+        """The model's chat template applied to ``messages``. ``thinking=False`` asks
+        templates that support it (``enable_thinking``) for a direct answer."""
+        body: dict = {"messages": messages}
+        if thinking is not None:
+            body["chat_template_kwargs"] = {"enable_thinking": thinking}
+        return self.post("/apply-template", body)["prompt"]
 
     def complete(self, prompt: str, n_predict: int, temperature: float, seed: int) -> str:
         body = {

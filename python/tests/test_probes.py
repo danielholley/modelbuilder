@@ -140,3 +140,9 @@ def test_skills_reports_per_category():
     finally:
         httpd.shutdown()
     assert r.by_category == {"code": 1.0, "reasoning": 0.0, "tool_use": 1.0, "languages": 0.0}
+
+
+def test_thinking_blocks_are_stripped():
+    assert probes.strip_thinking("<think>\nlet me see\n</think>\n\n123456") == "123456"
+    assert probes.strip_thinking("<think>still going") == ""
+    assert probes.strip_thinking("plain") == "plain"

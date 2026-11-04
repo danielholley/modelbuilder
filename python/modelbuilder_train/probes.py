@@ -26,6 +26,12 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 _PPL = re.compile(r"Final estimate: PPL = ([\d.]+) \+/- ([\d.]+)")
+_THINK = re.compile(r"<think>.*?(</think>|$)", re.DOTALL)
+
+
+def strip_thinking(answer: str) -> str:
+    """Drops a reasoning block (``<think>...</think>``, or an unfinished one) from a chat answer."""
+    return _THINK.sub("", answer).strip()
 
 
 @dataclass
@@ -127,8 +133,10 @@ def needle(
             doc = paragraphs[:]
             doc.insert(round(d * len(doc)), f"The secret code is {code}. ")
             question = "What is the secret code mentioned in the text? Answer with the number only."
-            prompt = server.apply_template([{"role": "user", "content": "".join(doc) + "\n\n" + question}])
-            answer = server.complete(prompt, n_predict=24, temperature=0.0, seed=seed)
+            prompt = server.apply_template(
+                [{"role": "user", "content": "".join(doc) + "\n\n" + question}], thinking=False
+            )
+            answer = strip_thinking(server.complete(prompt, n_predict=48, temperature=0.0, seed=seed))
             trial = NeedleTrial(n, d, code in answer, answer.strip()[:80])
             res.trials.append(trial)
             if progress:
@@ -437,8 +445,8 @@ def skills(server, items=None, *, model: str = "", seed: int = 0, n_predict: int
     """Asks every item through the chat template at temperature 0 and grades the answer."""
     res = SkillsResult(model)
     for category, prompt, grader, expected in items or SKILLS:
-        text = server.apply_template([{"role": "user", "content": prompt}])
-        answer = server.complete(text, n_predict=n_predict, temperature=0.0, seed=seed)
+        text = server.apply_template([{"role": "user", "content": prompt}], thinking=False)
+        answer = strip_thinking(server.complete(text, n_predict=n_predict, temperature=0.0, seed=seed))
         trial = SkillTrial(category, grade(grader, expected, answer), answer.strip()[:120])
         res.trials.append(trial)
         if progress:
