@@ -47,17 +47,19 @@ DeepSeek's published `deepseek-ai/dspark_qwen3_4b_block7`. The patch:
 
 - adds `llama_model_dspark_get_target_layers`, and the DSpark host loop enables
   capture of the drafter's tap layers on the target context;
-- `llama-speculative-simple`: for DSpark, outputs every prompt row (the
-  drafter reads the taps of all of them), raises the output limit to the
-  batch, and calls `common_speculative_begin` before processing the prompt
-  (DSpark's `begin()` clears the context that `process()` stages).
+- DSpark's `begin()` keeps context rows that `process()` staged for exactly the
+  prompt it is given, instead of clearing them (callers evaluate the prompt
+  before `begin()`);
+- `llama-server` and `llama-speculative-simple`: for DSpark, every prompt row
+  is an output (the drafter reads the taps of all of them) and the output
+  limit is raised to the batch.
 
 With it, a DSpark drafter trained by `modelbuilder job draft-align --kind
 dspark` against Qwen3.5-0.8B (200 CPU steps), converted with the fork's
 `convert_hf_to_gguf.py --target-model-dir`, drafts in `llama-speculative-simple
 --spec-type draft-dspark --no-repack`: 485 tokens drafted, 27 accepted (5.6%),
-matching the drafter's 5–7% top-1 in training. `llama-server` still doesn't
-output prompt rows for DSpark (same fix needed in its batch construction).
+matching the drafter's 5–7% top-1 in training; `llama-server --spec-type
+draft-dspark --no-repack`: 464 drafted, 26 accepted (5.6%).
 Two more limits of the fork, found the same way and not patched:
 
 - Only `qwen35` target graphs produce capture tensors, so DSpark targets must

@@ -218,8 +218,8 @@ These need hardware, data or runtime code that isn't in this repository:
 
 1. Run the real-model checks above on the cluster (item 6 and 8 of the
    revised order below).
-2. Train a DSpark drafter at scale on GPUs and measure its speedup; port
-   patch 0002's prompt-row fix to `llama-server`.
+2. Train a DSpark drafter at scale on GPUs and measure its speedup
+   (`llama-server` and `llama-speculative-simple` both run it with patch 0002).
 3. Run `trunk_distill --device-map auto` and `--shard fsdp` on real GPUs.
 
 ## Target hardware (the user's cluster)

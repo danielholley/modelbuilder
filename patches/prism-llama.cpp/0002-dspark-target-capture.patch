@@ -1,5 +1,5 @@
 diff --git a/common/speculative.cpp b/common/speculative.cpp
-index 76c7e6f..405d2a8 100644
+index 76c7e6f..59e3483 100644
 --- a/common/speculative.cpp
 +++ b/common/speculative.cpp
 @@ -423,6 +423,17 @@ struct common_speculative_impl_draft_dspark : public common_speculative_impl {
@@ -20,6 +20,32 @@ index 76c7e6f..405d2a8 100644
          n_embd        = meta.n_embd;
          n_vocab       = meta.n_vocab;
          n_capture     = meta.n_capture;
+@@ -622,17 +633,21 @@ struct common_speculative_impl_draft_dspark : public common_speculative_impl {
+         llama_batch_free(batch);
+     }
+ 
+-    void begin(llama_seq_id seq_id, const llama_tokens & /*prompt*/) override {
++    void begin(llama_seq_id seq_id, const llama_tokens & prompt) override {
+         if (seq_id < 0 || seq_id >= (llama_seq_id) n_seq) {
+             return;
+         }
+ 
+         // fresh generation: drop any leftover state from a prior generation
+         // that reused this seq slot, and make sure ctx_dft's own cache for
+-        // this seq starts empty.
++        // this seq starts empty. Context rows staged by process() for exactly
++        // this prompt (callers that evaluate the prompt before begin(), e.g.
++        // the server) are this generation's and are kept.
+         n_cache[seq_id] = 0;
+-        ctx_feat[seq_id].clear();
+-        ctx_pos[seq_id].clear();
++        if (ctx_pos[seq_id].size() != prompt.size()) {
++            ctx_feat[seq_id].clear();
++            ctx_pos[seq_id].clear();
++        }
+         rows_since_accept[seq_id] = 0;
+ 
+         llama_memory_seq_rm(llama_get_memory(params.ctx_dft), seq_id, 0, -1);
 diff --git a/examples/speculative-simple/speculative-simple.cpp b/examples/speculative-simple/speculative-simple.cpp
 index b4f2216..fe51bea 100644
 --- a/examples/speculative-simple/speculative-simple.cpp
@@ -104,3 +130,31 @@ index c07b9a7..fb934ac 100644
  bool llama_model_dspark_get_meta(const llama_model * model, llama_dspark_meta * out) {
      if (model == nullptr || out == nullptr) {
          return false;
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index 677c977..63556d5 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -1205,6 +1205,13 @@ private:
+         const auto output_limits = server_output_limits(params_base);
+         params_base.n_outputs_max = output_limits.total;
+         params_base.n_outputs_max_per_seq = output_limits.per_seq;
++        // DSpark reads the target's tapped layers for every prompt row
++        for (auto t : params_base.speculative.types) {
++            if (t == COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK) {
++                params_base.n_outputs_max         = params_base.n_batch;
++                params_base.n_outputs_max_per_seq = params_base.n_batch;
++            }
++        }
+ 
+         const bool has_mmproj = !params.mmproj.path.empty();
+         const bool has_draft = params.speculative.has_dft();
+@@ -4427,7 +4434,8 @@ private:
+                         add_ok &= batch.add(slot.id,
+                             cur_tok,
+                             /* pos       = */ slot.prompt.tokens.pos_next(),
+-                            /* output    = */ slot.need_embd(),
++                            /* output    = */ slot.need_embd() ||
++                                                (slot.spec && common_speculative_need_embd_capture(slot.spec)),
+                             /* is_prompt = */ true);
+                         if (!slot.task->decision.order.empty()) {
+                             batch.set_decision_order(batch.size() - 1, slot.task->decision.order[slot.prompt.n_tokens()]);
