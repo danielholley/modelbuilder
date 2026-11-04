@@ -494,7 +494,7 @@ pub fn convert(
             format!("Lowest K/V energy kept by the rank-{} factorization: {:.2}%.", opts.kv_rank, 100.0 * worst),
             format!("RoPE kept on {r} of {rot} rotary dimensions per head ({select:?} selection); the rest lose RoPE in Q and K."),
             "Original weights are linked, not copied: they are the teacher for recovery training (`trunk_distill` with trainable `self_attn.mla.`).".into(),
-            "No runtime runs this layout yet: llama.cpp and vLLM run MLA only in DeepSeek's architecture.".into(),
+            "Upstream llama.cpp and vLLM run MLA only in DeepSeek's architecture; `surgery mla-gguf` writes this layout for the patched fork (patches/prism-llama.cpp/).".into(),
         ],
     })
 }
@@ -780,7 +780,7 @@ pub fn write_gguf(
         metadata: vec![format!("{arch}.attention.mla_rank / mla_rope_dim / mla_rope_freqs")],
         notes: vec![
             format!("{} layers cache {} values per token instead of {}.", layers.len(), rank + n_kv * (r + 1), 2 * n_kv * hd),
-            "Runs with patches/prism-llama.cpp/0003 (qwen35 graphs). The latent tensors are F32; quantizing them is future work.".into(),
+            "Runs with patches/prism-llama.cpp/ 0003 (qwen35 graphs) and 0005 (qwen3 graphs). The latent tensors are F32; quantizing them is future work.".into(),
         ],
     })
 }

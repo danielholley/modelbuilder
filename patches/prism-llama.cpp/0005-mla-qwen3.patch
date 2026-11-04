@@ -1,0 +1,242 @@
+From 9400bbae521ba27f33951d874ad852c74dca655c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 4 Nov 2026 02:53:46 +0000
+Subject: [PATCH] 0005 mla for qwen3 graphs
+
+---
+ src/llama-hparams.cpp |  12 +++--
+ src/llama-hparams.h   |  13 +++--
+ src/models/models.h   |   4 ++
+ src/models/qwen3.cpp  | 115 +++++++++++++++++++++++++++++++++++++++---
+ 4 files changed, 129 insertions(+), 15 deletions(-)
+
+diff --git a/src/llama-hparams.cpp b/src/llama-hparams.cpp
+index 94cd3e1..bfa1bd5 100644
+--- a/src/llama-hparams.cpp
++++ b/src/llama-hparams.cpp
+@@ -144,7 +144,9 @@ uint32_t llama_hparams::mla_cache_width(uint32_t il) const {
+ }
+ 
+ uint32_t llama_hparams::n_embd_head_k(uint32_t il) const {
+-    if (il < n_layer_all && is_mla_layer(il)) {
++    if (il == il_default) {
++        il = 0;
++    } else if (il < n_layer_all && is_mla_layer(il)) {
+         return mla_cache_width(il);
+     }
+     if (il < n_layer_all) {
+@@ -155,7 +157,9 @@ uint32_t llama_hparams::n_embd_head_k(uint32_t il) const {
+ }
+ 
+ uint32_t llama_hparams::n_embd_head_v(uint32_t il) const {
+-    if (il < n_layer_all && is_mla_layer(il)) {
++    if (il == il_default) {
++        il = 0;
++    } else if (il < n_layer_all && is_mla_layer(il)) {
+         return 1; // V is decompressed from the latent; its cache row is unused
+     }
+     if (il < n_layer_all) {
+@@ -166,13 +170,13 @@ uint32_t llama_hparams::n_embd_head_v(uint32_t il) const {
+ }
+ 
+ uint32_t llama_hparams::n_embd_k_gqa(uint32_t il) const {
+-    const uint32_t n_head_kv = this->n_head_kv(il);
++    const uint32_t n_head_kv = this->n_head_kv(il == il_default ? 0 : il);
+ 
+     return n_embd_head_k(il) * n_head_kv;
+ }
+ 
+ uint32_t llama_hparams::n_embd_v_gqa(uint32_t il) const {
+-    const uint32_t n_head_kv = this->n_head_kv(il);
++    const uint32_t n_head_kv = this->n_head_kv(il == il_default ? 0 : il);
+ 
+     return n_embd_head_v(il) * n_head_kv;
+ }
+diff --git a/src/llama-hparams.h b/src/llama-hparams.h
+index fd41341..dd5d13b 100644
+--- a/src/llama-hparams.h
++++ b/src/llama-hparams.h
+@@ -522,15 +522,18 @@ struct llama_hparams {
+     // dimension of output embeddings
+     uint32_t n_embd_out() const;
+ 
+-    // dimension of key/value embeddings for each head (per layer)
+-    uint32_t n_embd_head_k(uint32_t il = 0) const;
+-    uint32_t n_embd_head_v(uint32_t il = 0) const;
++    // dimension of key/value embeddings for each head (per layer). Without a
++    // layer (il_default) these are layer 0's attention dims; a layer given
++    // explicitly that is converted to latent attention reports its cache row.
++    static constexpr uint32_t il_default = UINT32_MAX;
++    uint32_t n_embd_head_k(uint32_t il = il_default) const;
++    uint32_t n_embd_head_v(uint32_t il = il_default) const;
+ 
+     // dimension of key embeddings across all k-v heads
+-    uint32_t n_embd_k_gqa(uint32_t il = 0) const;
++    uint32_t n_embd_k_gqa(uint32_t il = il_default) const;
+ 
+     // dimension of value embeddings across all k-v heads
+-    uint32_t n_embd_v_gqa(uint32_t il = 0) const;
++    uint32_t n_embd_v_gqa(uint32_t il = il_default) const;
+ 
+     // true if any layer has a different n_embd_k_gqa/n_embd_v_gqa
+     bool is_n_embd_k_gqa_variable() const;
+diff --git a/src/models/models.h b/src/models/models.h
+index cc5e25f..38a870f 100644
+--- a/src/models/models.h
++++ b/src/models/models.h
+@@ -658,6 +658,10 @@ struct llama_model_qwen3 : public llama_model_base {
+ 
+         // the layers and the final norm: [n_embd, n_outputs]
+         ggml_tensor * build_backbone(const llama_model & model);
++
++        // attention for a layer converted to latent attention (modelbuilder surgery mla)
++        ggml_tensor * build_attn_mla(const llama_model & model, llm_graph_input_attn_kv * inp,
++                ggml_tensor * cur, ggml_tensor * inp_pos, int il);
+     };
+ 
+     std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
+diff --git a/src/models/qwen3.cpp b/src/models/qwen3.cpp
+index 11f1dc4..dfdfd70 100644
+--- a/src/models/qwen3.cpp
++++ b/src/models/qwen3.cpp
+@@ -1,4 +1,5 @@
+ #include "models.h"
++#include "llama-kv-cache.h"
+ 
+ void llama_model_qwen3::load_arch_hparams(llama_model_loader & ml) {
+     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
+@@ -37,11 +38,30 @@ void llama_model_qwen3::load_arch_tensors(llama_model_loader &) {
+ 
+         layer.attn_norm = create_tensor(tn(LLM_TENSOR_ATTN_NORM, "weight", i), {n_embd}, 0);
+ 
+-        create_tensor_qkv(layer, i, n_embd, n_embd_head_k * n_head, n_embd_gqa, n_embd_gqa, 0);
+-        layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_embd_head_k * n_head, n_embd}, 0);
+-
+-        layer.attn_k_norm = create_tensor(tn(LLM_TENSOR_ATTN_K_NORM, "weight", i), {n_embd_head_k}, 0);
+-        layer.attn_q_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_NORM, "weight", i), {n_embd_head_k}, 0);
++        if (hparams.is_mla_layer(i)) {
++            // latent attention converted from GQA: Q as before, K/V from the latent
++            const int64_t rank  = hparams.mla_rank[i];
++            const int64_t rope  = hparams.mla_rope_dim;
++            const int64_t n_kvh = hparams.n_head_kv(i);
++            layer.wq = create_tensor(tn(LLM_TENSOR_ATTN_Q, "weight", i), {n_embd, n_embd_head_k * n_head}, 0);
++            layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_embd_head_k * n_head, n_embd}, 0);
++            layer.attn_q_norm     = create_tensor(tn(LLM_TENSOR_ATTN_Q_NORM, "weight", i), {n_embd_head_k}, 0);
++            layer.mla_kv_a        = create_tensor(tn(LLM_TENSOR_ATTN_MLA_KV_A, "weight", i), {n_embd, rank}, 0);
++            layer.mla_kv_b        = create_tensor(tn(LLM_TENSOR_ATTN_MLA_KV_B, "weight", i),
++                                                  {rank, n_kvh * (n_embd_head_k - rope) + n_kvh * n_embd_head_k}, 0);
++            layer.mla_k_rope      = create_tensor(tn(LLM_TENSOR_ATTN_MLA_K_ROPE, "weight", i), {n_embd, n_kvh * rope}, 0);
++            layer.mla_k_rope_norm = create_tensor(tn(LLM_TENSOR_ATTN_MLA_K_ROPE_NORM, "weight", i), {rope}, 0);
++            layer.mla_k_nope_norm = create_tensor(tn(LLM_TENSOR_ATTN_MLA_K_NOPE_NORM, "weight", i), {n_embd_head_k - rope}, 0);
++            layer.mla_perm        = create_tensor(tn(LLM_TENSOR_ATTN_MLA_PERM, "weight", i), {n_embd_head_k, n_embd_head_k}, 0);
++            layer.mla_ff_q        = create_tensor(tn(LLM_TENSOR_ATTN_MLA_FF_Q, "weight", i), {n_rot / 2}, 0);
++            layer.mla_ff_k        = create_tensor(tn(LLM_TENSOR_ATTN_MLA_FF_K, "weight", i), {rope / 2}, 0);
++        } else {
++            create_tensor_qkv(layer, i, n_embd, n_embd_head_k * n_head, n_embd_gqa, n_embd_gqa, 0);
++            layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_embd_head_k * n_head, n_embd}, 0);
++
++            layer.attn_k_norm = create_tensor(tn(LLM_TENSOR_ATTN_K_NORM, "weight", i), {n_embd_head_k}, 0);
++            layer.attn_q_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_NORM, "weight", i), {n_embd_head_k}, 0);
++        }
+ 
+         layer.ffn_norm = create_tensor(tn(LLM_TENSOR_FFN_NORM, "weight", i), {n_embd}, 0);
+         layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", i), {n_embd,   n_ff}, 0);
+@@ -94,7 +114,9 @@ ggml_tensor * llama_model_qwen3::graph::build_backbone(const llama_model & model
+         cb(cur, "attn_norm", il);
+ 
+         // self-attention
+-        {
++        if (hparams.is_mla_layer(il)) {
++            cur = build_attn_mla(model, inp_attn, cur, inp_pos, il);
++        } else {
+             // compute Q and K and RoPE them
+             auto [Qcur, Kcur, Vcur] = build_qkv(model.layers[il], cur,
+                     n_embd_head, n_head, n_head_kv, il);
+@@ -167,3 +189,84 @@ ggml_tensor * llama_model_qwen3::graph::build_backbone(const llama_model & model
+ 
+     return cur;
+ }
++
++// Latent attention converted from GQA (modelbuilder surgery mla, MHA2MLA); the
++// qwen35 graph has the same layer with an output gate (see its comment there).
++// The cache holds, per token, [latent c | rope(k_rope * w_rope) | ||k_rope||^2 per head];
++// K RMSNorm is finished at read time, Q is permuted into the cached [rope; nope] order.
++ggml_tensor * llama_model_qwen3::graph::build_attn_mla(const llama_model & model, llm_graph_input_attn_kv * inp,
++        ggml_tensor * cur, ggml_tensor * inp_pos, int il) {
++    const auto & L = model.layers[il];
++
++    const int64_t hd    = hparams.n_embd_head_v();
++    const int64_t n_kvh = hparams.n_head_kv(il);
++    const int64_t rank  = hparams.mla_rank[il];
++    const int64_t rope  = hparams.mla_rope_dim;
++    const int64_t nope  = hd - rope;
++    const int64_t width = rank + n_kvh * (rope + 1);
++    const int64_t W     = hparams.mla_cache_width(il) * n_kvh; // padded
++
++    // queries: projection, Q norm, RoPE on the kept frequencies only, then [rope; nope] order
++    ggml_tensor * Qcur = ggml_reshape_3d(ctx0, build_lora_mm(L.wq, cur, L.wq_s), hd, n_head, n_tokens);
++    Qcur = build_norm(Qcur, L.attn_q_norm, nullptr, LLM_NORM_RMS, il);
++    Qcur = ggml_rope_ext(ctx0, Qcur, inp_pos, L.mla_ff_q,
++            n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
++            ext_factor, attn_factor, beta_fast, beta_slow);
++    Qcur = ggml_mul_mat(ctx0, L.mla_perm, ggml_reshape_2d(ctx0, ggml_cont(ctx0, Qcur), hd, n_head * n_tokens));
++    Qcur = ggml_reshape_3d(ctx0, Qcur, hd, n_head, n_tokens);
++    cb(Qcur, "mla_Qcur", il);
++
++    // the cached row for the new tokens
++    ggml_tensor * c   = build_lora_mm(L.mla_kv_a, cur);                                      // [rank, T]
++    ggml_tensor * kr  = ggml_reshape_3d(ctx0, build_lora_mm(L.mla_k_rope, cur), rope, n_kvh, n_tokens);
++    ggml_tensor * n2  = ggml_sum_rows(ctx0, ggml_sqr(ctx0, kr));                              // [1, n_kvh, T]
++    ggml_tensor * krw = ggml_mul(ctx0, kr, L.mla_k_rope_norm);
++    ggml_tensor * krr = ggml_rope_ext(ctx0, krw, inp_pos, L.mla_ff_k,
++            rope, LLAMA_ROPE_TYPE_NEOX, n_ctx_orig, freq_base, freq_scale,
++            ext_factor, attn_factor, beta_fast, beta_slow);
++    ggml_tensor * row = ggml_concat(ctx0, c, ggml_reshape_2d(ctx0, ggml_cont(ctx0, krr), rope * n_kvh, n_tokens), 0);
++    row = ggml_concat(ctx0, row, ggml_reshape_2d(ctx0, n2, n_kvh, n_tokens), 0);
++    if (W > width) {
++        row = ggml_pad(ctx0, row, W - width, 0, 0, 0);
++    }
++    cb(row, "mla_cache_row", il);
++
++    const auto * mctx = inp->mctx;
++    ggml_build_forward_expand(gf, mctx->cpy_k(ctx0, ggml_reshape_3d(ctx0, row, W / n_kvh, n_kvh, n_tokens),
++                                              inp->get_k_idxs(), il));
++    // the layer's V cache row is 1 wide and unused; zeros keep the V inputs in the graph
++    ggml_tensor * v_zero = ggml_scale(ctx0, ggml_cont(ctx0, ggml_view_3d(ctx0, c, 1, n_kvh, n_tokens,
++            ggml_element_size(c), c->nb[1], 0)), 0.0f);
++    ggml_build_forward_expand(gf, mctx->cpy_v(ctx0, v_zero, inp->get_v_idxs(), il));
++
++    // every cached position: decompress K and V
++    ggml_tensor * kc   = mctx->get_k(ctx0, il);                                               // [W/n_kvh, n_kvh, n_kv, n_stream]
++    const int64_t n_kv = kc->ne[2];
++    const int64_t ns   = kc->ne[3];
++    const size_t  es   = ggml_element_size(kc);
++    const size_t  rs   = kc->nb[2];
++    const size_t  ss   = kc->nb[3];
++    auto f32 = [&](ggml_tensor * t) { return ggml_cast(ctx0, ggml_cont(ctx0, t), GGML_TYPE_F32); };
++    ggml_tensor * c_all   = f32(ggml_view_3d(ctx0, kc, rank, n_kv, ns, rs, ss, 0));
++    ggml_tensor * krr_all = f32(ggml_view_4d(ctx0, kc, rope, n_kvh, n_kv, ns, es * rope, rs, ss, es * rank));
++    ggml_tensor * n2_all  = f32(ggml_view_4d(ctx0, kc, 1, n_kvh, n_kv, ns, es, rs, ss, es * (rank + n_kvh * rope)));
++
++    ggml_tensor * kvb = ggml_mul_mat(ctx0, L.mla_kv_b, c_all);                                // [n_kvh*nope + n_kvh*hd, n_kv, ns]
++    const size_t  fs  = ggml_element_size(kvb);
++    ggml_tensor * kn  = ggml_cont(ctx0, ggml_view_4d(ctx0, kvb, nope, n_kvh, n_kv, ns,
++            fs * nope, kvb->nb[1], kvb->nb[2], 0));
++    ggml_tensor * V   = ggml_cont(ctx0, ggml_view_4d(ctx0, kvb, hd, n_kvh, n_kv, ns,
++            fs * hd, kvb->nb[1], kvb->nb[2], fs * n_kvh * nope));
++
++    // K RMSNorm over the whole head: 1/sqrt((||k_rope||^2 + ||k_nope||^2)/hd + eps)
++    ggml_tensor * ms = ggml_scale_bias(ctx0, ggml_add(ctx0, n2_all, ggml_sum_rows(ctx0, ggml_sqr(ctx0, kn))),
++            1.0f / (float) hd, hparams.f_norm_rms_eps);
++    ggml_tensor * K  = ggml_concat(ctx0, krr_all, ggml_mul(ctx0, kn, L.mla_k_nope_norm), 0);  // [hd, n_kvh, n_kv, ns]
++    K = ggml_div(ctx0, K, ggml_sqrt(ctx0, ms));
++    cb(K, "mla_K", il);
++
++    cur = build_attn_mha(Qcur, K, V, nullptr, inp->get_kq_mask(), nullptr, nullptr, 0, 1.0f / sqrtf(float(hd)), il);
++    cb(cur, "mla_attn", il);
++
++    return build_lora_mm(L.wo, cur, L.wo_s);
++}
+-- 
+2.43.0
+

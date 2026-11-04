@@ -103,4 +103,24 @@ Checked on Qwen3-0.6B converted to F32 with `surgery kv-share --group 2`
 84.3% top-1 over 1,266 tokens; against unshared PyTorch, 0.117 and 0.55%. The
 `llama` graph has the identical edit but hasn't been run on a real model.
 
-Apply 0001, 0002, 0003, then 0004 (each a diff on top of the previous one).
+## 0005: MLA for `qwen3` graphs
+
+0003's latent attention for `qwen3` graphs (no output gate; plain NEOX RoPE
+with the kept frequencies as frequency factors). It also changes the
+argument-less `n_embd_head_k()`/`n_embd_head_v()`/`n_embd_{k,v}_gqa()` to mean
+the model's attention dims: with 0003 alone they returned layer 0's cache row
+when layer 0 was converted, so a dense model with every layer converted didn't
+load (Qwen3.5's layer 0 is recurrent, which hid it).
+
+Checked on Qwen3-0.6B (8 KV heads × 128), 2026-11-04:
+
+- rank 256 with 32 RoPE dims, all 28 layers, F32 base: KV cache 224.00 →
+  57.75 MiB at 1,024 tokens × 2 sequences, and `probe hf-vs-gguf` against the
+  PyTorch MLA model gives cosine 0.99997 (min 0.99871), 98.9% top-1 over
+  1,266 tokens (against the unconverted model: 0.044, 0.08%; the conversion is
+  untrained);
+- full rank on the Q8_0 GGUF: 0.9990 / 96.3% against PyTorch, as close as the
+  unconverted Q8_0 model gets (0.9989 / 95.9%); perplexity 62.97 vs 62.56
+  (the latent is F32 from unquantized K/V, the original's K/V are Q8_0).
+
+Apply 0001 through 0005 in order (each a diff on top of the previous one).

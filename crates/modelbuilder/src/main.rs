@@ -241,7 +241,7 @@ enum SurgeryOp {
     },
     /// Write an MLA conversion (`surgery mla`, optionally trained with
     /// `job trunk-distill --mla-rank`) into a copy of the GGUF it came from,
-    /// for the fork patch in patches/prism-llama.cpp/ (qwen35 graphs).
+    /// for the fork patches in patches/prism-llama.cpp/ (qwen35 and qwen3 graphs).
     MlaGguf {
         /// The GGUF the HF checkpoint was exported from.
         target: PathBuf,

@@ -185,7 +185,12 @@ python -m modelbuilder_train generate-corpus | extract-features | run | validate
   converted at full rank keeps its perplexity (47.4867 vs 47.4850); at rank 256
   with 32 RoPE dims the KV cache shrinks 3.2× (24.00 → 7.59 MiB at 1,024
   tokens) and the runtime matches the PyTorch MLA model at cosine 1.000000 and
-  100% top-1.
+  100% top-1. Patch 0005 adds `qwen3` graphs: Qwen3-0.6B at rank 256 with 32
+  RoPE dims (all 28 layers, untrained) shrinks the cache 3.9× (224.00 → 57.75
+  MiB at 1,024 tokens × 2 sequences) and matches the PyTorch MLA model at
+  cosine 0.99997 / 98.9% top-1 on an F32 base; at full rank on the Q8_0 GGUF
+  it agrees with PyTorch as closely as the unconverted Q8_0 model does
+  (0.9990 / 96.3% vs 0.9989 / 95.9%).
 - **Dashboards:** the web UI was driven in a browser on the real GGUF. A
   training run was started from the Jobs page and followed to completion. The
   TUI was run in a real terminal on the model and on a training job.
@@ -210,7 +215,8 @@ These need hardware, data or runtime code that isn't in this repository:
   - KV sharing runs with patches 0001 and 0004 for `qwen35`, `qwen3` and
     `llama` graphs (the `llama` graph is untested on a real model);
     upstreaming it, and other architectures' graphs, are open;
-  - MLA runs with patch 0003 for `qwen35` graphs (F32 latent tensors;
+  - MLA runs with patches 0003 and 0005 for `qwen35` and `qwen3` graphs
+    (`llama` has no K norm, which the cache layout assumes; F32 latent tensors;
     quantizing them in the source format is open);
   - Medusa/EAGLE-1 heads in GGUF: the drafters are written as safetensors
     for runtimes that load them (e.g. vLLM).
