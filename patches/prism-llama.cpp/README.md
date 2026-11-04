@@ -37,3 +37,21 @@ cache halves (2 → 1 cache layers, 32 → 16 MiB at 4096 tokens), and
 `probe hf-vs-gguf --kv-share-group 2` against the PyTorch model with the same
 sharing gives cosine 0.99996 (min 0.99972) and 99.05% top-1 agreement over
 1,266 tokens; without sharing on the PyTorch side, 0.972 and 79.8%.
+
+## 0002: DSpark drafters capture their target layers
+
+At the fork commit above, nothing calls `llama_set_capture_layers`, so
+`--spec-type draft-dspark` fails on the first speculative batch for every
+checkpoint ("llama_get_embeddings_capture_ith(0) returned null"), including
+DeepSeek's published `deepseek-ai/dspark_qwen3_4b_block7`. The patch adds
+`llama_model_dspark_get_target_layers` and has the DSpark host loop enable
+capture of the drafter's tap layers on the target context. Two more limits of
+the fork, found the same way and not patched:
+
+- Only `qwen35` target graphs produce capture tensors, so DSpark targets must
+  be Qwen3.5-family models (as PrismML's shipped drafters are).
+- With weight repacking on (the CPU default), reading the drafter's Markov head
+  calls a null function and crashes (`llama_model_dspark_get_markov`); run with
+  `--no-repack`.
+
+Patches 0001 and 0002 apply together, in either order.

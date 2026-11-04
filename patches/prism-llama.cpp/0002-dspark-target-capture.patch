@@ -1,0 +1,59 @@
+diff --git a/common/speculative.cpp b/common/speculative.cpp
+index 76c7e6f..405d2a8 100644
+--- a/common/speculative.cpp
++++ b/common/speculative.cpp
+@@ -423,6 +423,17 @@ struct common_speculative_impl_draft_dspark : public common_speculative_impl {
+                 "dspark: ctx_dft's model does not look like a dspark drafter (missing dspark.*.block_size KV)");
+         }
+ 
++        // The drafter reads hidden states tapped from these target layers: have the
++        // target graph capture them (concatenated per position, in this order).
++        {
++            std::vector<int32_t> taps(meta.n_capture);
++            const int32_t n_taps = llama_model_dspark_get_target_layers(model_dft, taps.data(), (int32_t) taps.size());
++            if (n_taps != (int32_t) meta.n_capture || n_taps == 0) {
++                throw std::runtime_error("dspark: drafter declares no target layers to tap");
++            }
++            llama_set_capture_layers(ctx_tgt, taps.data(), taps.size());
++        }
++
+         n_embd        = meta.n_embd;
+         n_vocab       = meta.n_vocab;
+         n_capture     = meta.n_capture;
+diff --git a/src/llama-ext.h b/src/llama-ext.h
+index e50b30e..5feae74 100644
+--- a/src/llama-ext.h
++++ b/src/llama-ext.h
+@@ -242,6 +242,10 @@ struct llama_dspark_meta {
+ // Returns false if `model` is not a loaded dspark model (block_size == 0).
+ LLAMA_API bool llama_model_dspark_get_meta(const struct llama_model * model, llama_dspark_meta * out);
+ 
++// The target-model layer indices a dspark drafter taps, in capture order. Writes at
++// most n_max ids to out and returns the total count (0 if `model` is not a dspark model).
++LLAMA_API int32_t llama_model_dspark_get_target_layers(const struct llama_model * model, int32_t * out, int32_t n_max);
++
+ // Only the "vanilla" markov head (a plain low-rank embedding + linear pair,
+ // VanillaMarkov in the DeepSpec reference) is supported here: it's the only
+ // variant present in shipped GGUFs today -- gated/rnn markov heads carry
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index 14ecc84..d50af9d 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -3870,6 +3870,17 @@ ggml_backend_dev_t llama_model_get_device(const struct llama_model * model, int
+     return model->devices[i].dev;
+ }
+ 
++int32_t llama_model_dspark_get_target_layers(const llama_model * model, int32_t * out, int32_t n_max) {
++    if (model == nullptr || model->hparams.dspark_block_size == 0) {
++        return 0;
++    }
++    const auto & hp = model->hparams;
++    for (uint32_t i = 0; i < hp.n_dspark_target_layers && (int32_t) i < n_max; ++i) {
++        out[i] = (int32_t) hp.dspark_target_layers[i];
++    }
++    return (int32_t) hp.n_dspark_target_layers;
++}
++
+ bool llama_model_dspark_get_meta(const llama_model * model, llama_dspark_meta * out) {
+     if (model == nullptr || out == nullptr) {
+         return false;
