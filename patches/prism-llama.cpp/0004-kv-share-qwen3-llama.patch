@@ -1,0 +1,61 @@
+From 4ef81e9741d2c3c7cd202e421b705ad40d40efe7 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 4 Nov 2026 02:43:10 +0000
+Subject: [PATCH] 0004 kv share for qwen3 and llama graphs
+
+---
+ src/llama-model.cpp  | 2 +-
+ src/models/llama.cpp | 4 +++-
+ src/models/qwen3.cpp | 4 +++-
+ 3 files changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index 939895c..3b6d0b9 100644
+--- a/src/llama-model.cpp
++++ b/src/llama-model.cpp
+@@ -3376,7 +3376,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params,
+                                 hparams.swa_type,
+                                 nullptr,
+                                 filter,
+-                                nullptr,
++                                reuse,
+                                 nullptr);
+                     }
+                 }
+diff --git a/src/models/llama.cpp b/src/models/llama.cpp
+index f9c1251..f97a791 100644
+--- a/src/models/llama.cpp
++++ b/src/models/llama.cpp
+@@ -166,9 +166,11 @@ llama_model_llama::graph<embed>::graph(const llama_model & model, const llm_grap
+                 cb(Qcur, "Qcur_normed", il);
+                 cb(Kcur, "Kcur_normed", il);
+             }
++            // cross-layer KV sharing: a reuse layer reads its producer's cache and writes none
++            const bool reuse_kv = hparams.kv_reuse_layer[il] >= 0;
+             cur = build_attn(inp_attn,
+                     model.layers[il].wo, model.layers[il].wo_b, model.layers[il].wo_s,
+-                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
++                    Qcur, reuse_kv ? nullptr : Kcur, reuse_kv ? nullptr : Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+             cb(cur, "attn_out", il);
+         }
+         if (il == n_layer - 1 && inp_out_ids) {
+diff --git a/src/models/qwen3.cpp b/src/models/qwen3.cpp
+index c01f838..11f1dc4 100644
+--- a/src/models/qwen3.cpp
++++ b/src/models/qwen3.cpp
+@@ -121,9 +121,11 @@ ggml_tensor * llama_model_qwen3::graph::build_backbone(const llama_model & model
+             cb(Kcur, "Kcur", il);
+             cb(Vcur, "Vcur", il);
+ 
++            // cross-layer KV sharing: a reuse layer reads its producer's cache and writes none
++            const bool reuse_kv = hparams.kv_reuse_layer[il] >= 0;
+             cur = build_attn(inp_attn,
+                     model.layers[il].wo, model.layers[il].wo_b, model.layers[il].wo_s,
+-                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il);
++                    Qcur, reuse_kv ? nullptr : Kcur, reuse_kv ? nullptr : Vcur, nullptr, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il);
+         }
+         if (il == n_layer - 1 && inp_out_ids) {
+             cur   = ggml_get_rows(ctx0,   cur, inp_out_ids);
+-- 
+2.43.0
+

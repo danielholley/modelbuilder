@@ -171,7 +171,10 @@ python -m modelbuilder_train generate-corpus | extract-features | run | validate
 - **Cross-layer KV sharing in llama.cpp** (patch in `patches/prism-llama.cpp/`):
   on the pruned 8-layer Bonsai the cache halves, and the runtime matches the
   PyTorch model with the same sharing at cosine 0.99996 / 99.05% top-1 (the
-  unshared control: 0.972 / 79.8%).
+  unshared control: 0.972 / 79.8%). With patch 0004, `qwen3` and `llama`
+  graphs share too: Qwen3-0.6B (F32, every second layer reusing its
+  neighbour's cache, untrained) matches PyTorch with the same sharing at
+  cosine 0.997 / 84.3% top-1 (unshared control 0.117 / 0.55%).
 - **DSpark in llama.cpp** (patch 0002): a drafter trained against
   Qwen3.5-0.8B by `job draft-align --kind dspark`, converted with the fork's
   converter, drafts in `llama-speculative-simple --spec-type draft-dspark`;
@@ -204,8 +207,9 @@ These need hardware, data or runtime code that isn't in this repository:
   `trunk_distill` run on the real model, `--device-map` and `--shard fsdp` on
   real GPUs, and the quantized-KV measurement at long contexts.
 - **Runtime support** that lives in llama.cpp (or the PrismML fork), not here:
-  - KV sharing runs with the patch in `patches/prism-llama.cpp/` (qwen35
-    graphs); upstreaming it, and other architectures' graphs, are open;
+  - KV sharing runs with patches 0001 and 0004 for `qwen35`, `qwen3` and
+    `llama` graphs (the `llama` graph is untested on a real model);
+    upstreaming it, and other architectures' graphs, are open;
   - MLA runs with patch 0003 for `qwen35` graphs (F32 latent tensors;
     quantizing them in the source format is open);
   - Medusa/EAGLE-1 heads in GGUF: the drafters are written as safetensors

@@ -27,9 +27,10 @@ layer whose KV cache this layer reads, or -1), written by
   and output gate, but attends over the producer's cached K/V and writes none.
 - `build_attn` (non-SWA) accepts null K/V, as the SWA overload already did.
 
-Other architectures read the key (and share the cache) but their graphs still
-pass their own K/V to `build_attn`, which would write into the producer's
-cache; extend their graphs the same way before using the key with them.
+Patch 0004 extends the graphs to `qwen3` and `llama`. Other architectures
+read the key (and share the cache) but their graphs still pass their own K/V
+to `build_attn`, which would write into the producer's cache; extend their
+graphs the same way before using the key with them.
 
 Checked on the real model (2026-11-04): Ternary-Bonsai-2-27B pruned to 8
 layers (attention layers 3 and 7) with `surgery kv-share --group 2`. The KV
@@ -89,4 +90,17 @@ dims), 2026-11-04:
   0.999996), 100% top-1 over 1,266 tokens. Against the unconverted model:
   0.969 and 80.1%.
 
-Apply 0001, 0002, then 0003 (each a diff on top of the previous one).
+## 0004: KV sharing for `qwen3` and `llama` graphs
+
+The same graph change as 0001's for `qwen35` (a reuse layer passes null K/V to
+`build_attn`), and the plain (non-hybrid, non-SWA) KV cache now gets the reuse
+map too; before it, a shared dense model failed at context creation
+(`unordered_map::at`).
+
+Checked on Qwen3-0.6B converted to F32 with `surgery kv-share --group 2`
+(14 reuse layers, untrained, so the model itself is badly off), 2026-11-04:
+`probe hf-vs-gguf --kv-share-group 2` gives cosine 0.997 (min 0.949) and
+84.3% top-1 over 1,266 tokens; against unshared PyTorch, 0.117 and 0.55%. The
+`llama` graph has the identical edit but hasn't been run on a real model.
+
+Apply 0001, 0002, 0003, then 0004 (each a diff on top of the previous one).
