@@ -153,6 +153,25 @@ python -m modelbuilder_train generate-corpus | extract-features | run | validate
   ≥ 0.987 (the +1 offset is removed). A transform or permutation error would
   collapse those numbers. The llama.cpp side (`probe hf-vs-gguf`) is still
   to run.
+- **`probe hf-vs-gguf`** (2026-11-04, the PrismML fork built here): the
+  export of the pruned 4-layer target matches llama.cpp's hidden states at
+  cosine 0.99998 (min 0.99986), relative RMS 6.8e-3, 99.37% top-1 agreement
+  over 1,266 tokens (HF side in bf16).
+- **Quantized KV cache** (`probe kv-cache`, full 27B on CPU): perplexity over
+  4 × 1,024 tokens f16 14.088, q8_0 14.084 (−0.03%), q4_0 14.214 (+0.89%);
+  needle retrieval at 2,048 tokens 100% for all three. So q4_0 needs no QAT at
+  these lengths; long contexts (where KV error accumulates) are too slow on
+  this CPU and remain to measure.
+- **Upcycling in llama.cpp:** Qwen3-0.6B upcycled to `qwen3moe` (4 experts,
+  top-2) has the dense model's perplexity exactly with F32 weights (58.9647
+  both); with Q8_0 weights it is 0.1% off, from the MoE matmul's activation
+  quantization, not the routing (top-1 routing is off by the same amount).
+  The pruned Bonsai upcycled to `qwen35moe` with a shared expert loads and
+  matches the dense model to 0.004%.
+- **Cross-layer KV sharing in llama.cpp** (patch in `patches/prism-llama.cpp/`):
+  on the pruned 8-layer Bonsai the cache halves, and the runtime matches the
+  PyTorch model with the same sharing at cosine 0.99996 / 99.05% top-1 (the
+  unshared control: 0.972 / 79.8%).
 - **Dashboards:** the web UI was driven in a browser on the real GGUF. A
   training run was started from the Jobs page and followed to completion. The
   TUI was run in a real terminal on the model and on a training job.
@@ -169,24 +188,20 @@ model.
 
 These need hardware, data or runtime code that isn't in this repository:
 
-- **Real-model checks of the newer pipeline** (steps in
-  [`verify-export-and-kv-qat.md`](runbooks/verify-export-and-kv-qat.md)):
-  - `probe hf-vs-gguf` on a pruned copy of the target (about 17 GB of disk;
-    the per-tensor check against Qwen3.8-27B is done);
-  - a `trunk_distill` run on GPUs;
-  - the quantized-KV measurement (`probe kv-cache`), which decides whether
-    KV QAT is worth its cost on the target.
+- **GPU runs** (steps in
+  [`verify-export-and-kv-qat.md`](runbooks/verify-export-and-kv-qat.md)): a
+  `trunk_distill` run on the real model, `--device-map` and `--shard fsdp` on
+  real GPUs, and the quantized-KV measurement at long contexts.
 - **Runtime support** that lives in llama.cpp (or the PrismML fork), not here:
-  - KV-sharing reuse layers: training works, but no build runs them, so the
-    written-back GGUF still carries every layer's K/V;
-  - MLA outside DeepSeek's architecture: a converted model stays in HF form;
+  - KV sharing runs with the patch in `patches/prism-llama.cpp/` (qwen35
+    graphs); upstreaming it, and other architectures' graphs, are open;
+  - MLA outside DeepSeek's architecture: a converted model stays in HF form
+    (design for the fork in `patches/prism-llama.cpp/mla-runtime-design.md`);
   - Medusa/EAGLE-1 heads in GGUF: the drafters are written as safetensors
     for runtimes that load them (e.g. vLLM).
-- **A llama.cpp check of `surgery upcycle`**: transformers' MoE classes give
-  the dense model's logits exactly, but no llama.cpp run has yet (building
-  llama.cpp wasn't possible in the session that wrote it). The `qwen35moe`
-  key and tensor names follow llama.cpp's qwen2moe/qwen3next conventions
-  and need that run to confirm.
+- **Upcycling at scale:** checked in llama.cpp on Qwen3-0.6B and a pruned
+  Bonsai (see *Measured*); a full-size upcycled model, and continued
+  pretraining at the paper's scale, are untested.
 - **Backends**: `mlx` runs `mtp_align` only (other stages use torch on MPS).
   Multi-node training is FSDP2 over `torchrun` in the `hf` stage; tensor,
   pipeline or context parallelism (a `torchtitan` backend) for continued
@@ -255,12 +270,12 @@ What that changes:
 5. ✅ The [runbook](runbooks/bonsai2-mtp.md) and `bench-draft`. On the real
    model the ported head accepts 20 of 23 drafts on a code prompt, a 1.93×
    speedup on CPU.
-6. Verify `export-hf` on the real model. ✅ Per-tensor cosine against
-   Qwen3.8-27B (see *Measured on the real model*); hidden states against
-   llama.cpp with `probe hf-vs-gguf` still to run.
+6. ✅ Verify `export-hf` on the real model: per-tensor cosine against
+   Qwen3.8-27B, and hidden states against llama.cpp (`probe hf-vs-gguf`).
 7. ✅ Stage ordering in the planner, and now the pipeline of commands.
-8. Measure quantized-KV quality (`probe kv-cache`: perplexity, long-context
-   retrieval), then decide on QAT.
+8. ✅ (short contexts) Measure quantized-KV quality: q4_0 costs +0.89%
+   perplexity and no retrieval at 2K tokens, so no QAT for now; repeat at long
+   contexts on GPUs.
 
 ## Open questions
 

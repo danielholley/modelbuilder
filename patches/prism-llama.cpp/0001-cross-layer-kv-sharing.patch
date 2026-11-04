@@ -22,6 +22,60 @@ index 4c761c6..c5fd1cd 100644
      LLM_KV_ATTENTION_SCALE,
      LLM_KV_ATTENTION_ROPE_PATTERN,
      LLM_KV_ATTENTION_VALUE_EXPERT_COUNT,
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 672b4a3..6a595c0 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -3334,12 +3334,18 @@ ggml_tensor * llm_graph_context::build_attn(
+             int       il) const {
+     GGML_ASSERT(v_mla == nullptr);
+ 
++    // k_cur/v_cur are null for a layer that reads another layer's cache
++    // (cross-layer KV sharing): attend over the cache without writing to it
++    GGML_ASSERT((k_cur == nullptr) == (v_cur == nullptr));
++
+     if (inp->self_k_rot) {
+         q_cur = llama_mul_mat_hadamard(ctx0, q_cur, inp->self_k_rot);
+-        k_cur = llama_mul_mat_hadamard(ctx0, k_cur, inp->self_k_rot);
++        if (k_cur) {
++            k_cur = llama_mul_mat_hadamard(ctx0, k_cur, inp->self_k_rot);
++        }
+     }
+ 
+-    if (inp->self_v_rot) {
++    if (inp->self_v_rot && v_cur) {
+         v_cur = llama_mul_mat_hadamard(ctx0, v_cur, inp->self_v_rot);
+     }
+ 
+@@ -3347,8 +3353,10 @@ ggml_tensor * llm_graph_context::build_attn(
+     // by doing so, the number of splits in the graph is reduced
+     // expand k later to enable rope fusion which directly writes into k-v cache
+     ggml_build_forward_expand(gf, q_cur);
+-    ggml_build_forward_expand(gf, v_cur);
+-    ggml_build_forward_expand(gf, k_cur);
++    if (k_cur) {
++        ggml_build_forward_expand(gf, v_cur);
++        ggml_build_forward_expand(gf, k_cur);
++    }
+ 
+     const auto * mctx_cur = inp->mctx;
+ 
+@@ -3356,13 +3364,13 @@ ggml_tensor * llm_graph_context::build_attn(
+     ggml_tensor * k;
+     ggml_tensor * v;
+ 
+-    if (cparams.training) {
++    if (cparams.training && k_cur) {
+         GGML_ASSERT(mctx_cur->get_n_kv() == n_tokens);
+ 
+         k = k_cur;
+         v = v_cur;
+     } else {
+-        {
++        if (k_cur) {
+             const auto & k_idxs = inp->get_k_idxs();
+             const auto & v_idxs = inp->get_v_idxs();
+ 
 diff --git a/src/llama-hparams.cpp b/src/llama-hparams.cpp
 index b83f45b..ea1843d 100644
 --- a/src/llama-hparams.cpp

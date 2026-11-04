@@ -25,11 +25,15 @@ layer whose KV cache this layer reads, or -1), written by
   hybrid (attention + recurrent) memory, so reuse layers allocate nothing.
 - `qwen35` graphs: a reuse layer still computes its own queries, Q norm, RoPE
   and output gate, but attends over the producer's cached K/V and writes none.
+- `build_attn` (non-SWA) accepts null K/V, as the SWA overload already did.
 
 Other architectures read the key (and share the cache) but their graphs still
 pass their own K/V to `build_attn`, which would write into the producer's
 cache; extend their graphs the same way before using the key with them.
 
-Checked on the real model: see `docs/STATUS.md` (a pruned Ternary-Bonsai-2-27B
-with `kv-share --group 2`, compared token by token with the PyTorch model that
-`trunk_distill` trains with the same sharing).
+Checked on the real model (2026-11-04): Ternary-Bonsai-2-27B pruned to 8
+layers (attention layers 3 and 7) with `surgery kv-share --group 2`. The KV
+cache halves (2 → 1 cache layers, 32 → 16 MiB at 4096 tokens), and
+`probe hf-vs-gguf --kv-share-group 2` against the PyTorch model with the same
+sharing gives cosine 0.99996 (min 0.99972) and 99.05% top-1 agreement over
+1,266 tokens; without sharing on the PyTorch side, 0.972 and 79.8%.
