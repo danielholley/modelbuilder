@@ -174,7 +174,9 @@ python -m modelbuilder_train generate-corpus | extract-features | run | validate
   unshared control: 0.972 / 79.8%). With patch 0004, `qwen3` and `llama`
   graphs share too: Qwen3-0.6B (F32, every second layer reusing its
   neighbour's cache, untrained) matches PyTorch with the same sharing at
-  cosine 0.997 / 84.3% top-1 (unshared control 0.117 / 0.55%).
+  cosine 0.997 / 84.3% top-1 (unshared control 0.117 / 0.55%), and
+  SmolLM2-135M (`llama`) at 0.99992 / 98.0% with its cache halved (control
+  0.183 / 1.2%).
 - **DSpark in llama.cpp** (patch 0002): a drafter trained against
   Qwen3.5-0.8B by `job draft-align --kind dspark`, converted with the fork's
   converter, drafts in `llama-speculative-simple --spec-type draft-dspark`;
@@ -213,7 +215,7 @@ These need hardware, data or runtime code that isn't in this repository:
   real GPUs, and the quantized-KV measurement at long contexts.
 - **Runtime support** that lives in llama.cpp (or the PrismML fork), not here:
   - KV sharing runs with patches 0001 and 0004 for `qwen35`, `qwen3` and
-    `llama` graphs (the `llama` graph is untested on a real model);
+    `llama` graphs (all three checked against PyTorch);
     upstreaming it, and other architectures' graphs, are open;
   - MLA runs with patches 0003 and 0005 for `qwen35` and `qwen3` graphs
     (`llama` has no K norm, which the cache layout assumes). The latent

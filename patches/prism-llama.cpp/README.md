@@ -101,8 +101,11 @@ map too; before it, a shared dense model failed at context creation
 Checked on Qwen3-0.6B converted to F32 with `surgery kv-share --group 2`
 (14 reuse layers, untrained, so the model itself is badly off), 2026-11-04:
 `probe hf-vs-gguf --kv-share-group 2` gives cosine 0.997 (min 0.949) and
-84.3% top-1 over 1,266 tokens; against unshared PyTorch, 0.117 and 0.55%. The
-`llama` graph has the identical edit but hasn't been run on a real model.
+84.3% top-1 over 1,266 tokens; against unshared PyTorch, 0.117 and 0.55%.
+`llama` graph: SmolLM2-135M (F32, 30 → 15 cache layers, 45.00 → 22.50 MiB at
+1,024 tokens × 2 sequences) gives 0.99992 (min 0.99925) and 98.0% top-1 over
+1,285 tokens; unshared control 0.183 and 1.2% (the unshared GGUF itself:
+1.000000, 99.9%).
 
 ## 0005: MLA for `qwen3` graphs
 
